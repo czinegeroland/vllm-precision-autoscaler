@@ -85,7 +85,7 @@ for cfg in $CONFIGS; do
   vllm bench serve --model "$MODEL" --dataset-name random --random-input-len "$INPUT_LEN" \
     --random-output-len 32 --num-prompts 16 --max-concurrency 8 --ignore-eos --seed 1 >/dev/null 2>&1
   for c in $CONCURRENCY; do
-    n=$(( c * 8 )); [ $n -lt 16 ] && n=16
+    n=$(( c * 8 )); [ $n -lt ${MIN_PROMPTS:-16} ] && n=${MIN_PROMPTS:-16}
     [ "$ACCT" = 1 ] && { n=$(( c * 4 )); [ $n -lt 16 ] && n=16; rpc vpa_reset >/dev/null; }
     echo "$(date -u +%FT%TZ) start c=$c" >> "$OUT/$cfg.timeline.txt"
     vllm bench serve --model "$MODEL" --dataset-name random \
