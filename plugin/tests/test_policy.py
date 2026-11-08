@@ -156,6 +156,12 @@ class SwapSettingsTests(unittest.TestCase):
         s = Settings.from_env({"VPA_FORMAT": "swap", "VPA_SWAP_UP": "100", "VPA_SWAP_SLOTS": "2"})
         self.assertEqual((s.format, s.swap_up, s.swap_slots), ("swap", 100.0, 2))
 
+    def test_swap_policy_defaults_to_external(self):
+        self.assertEqual(Settings.from_env({"VPA_FORMAT": "swap"}).swap_policy, "external")
+        self.assertEqual(Settings.from_env({"VPA_SWAP_POLICY": "hysteresis"}).swap_policy, "hysteresis")
+        with self.assertRaises(ValueError):
+            Settings.from_env({"VPA_SWAP_POLICY": "magic"})
+
     def test_unknown_format(self):
         with self.assertRaises(ValueError):
             Settings.from_env({"VPA_FORMAT": "int4"})

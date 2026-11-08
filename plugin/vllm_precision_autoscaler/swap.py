@@ -71,10 +71,12 @@ class SwapManager:
         self.layers: dict[int, SwapLayer] = {}
         self.order: list[int] = []
         self.target = "fp8" if settings.mode == "fp8" else "high"
+        # Deciding *when* to switch is an external controller's job by default
+        # (POST /v1/precision). The built-in policy is an explicit opt-in.
         self.policy = (
             HysteresisPolicy(settings.swap_up, settings.swap_down, settings.swap_dwell_s,
                              settings.swap_ema_s, start=self.target)
-            if settings.mode == "auto" else None
+            if settings.mode == "auto" and settings.swap_policy == "hysteresis" else None
         )
         self.staging: list[torch.Tensor] = []
         self.slot_free: list[torch.cuda.Event | None] = []
@@ -146,6 +148,23 @@ class SwapManager:
                 m.target, m.layers, m.bytes / 2**30, m.finished - m.started, m.steps,
             )
 
+    def pump(self) -> None:
+        """Advance a pending migration outside an engine step (from an RPC,
+        which vLLM runs between steps). Lets a migration finish while idle."""
+        if self.current is None and not self.inflight and not self._pending():
+            return
+        self._complete()
+        self._launch()
+        if self.current is not None and not self.inflight and not self._pending():
+            m = self.current
+            m.finished = time.monotonic()
+            self.migrations.append(m)
+            self.current = None
+            self.logger.info(
+                "precision_autoscaler swap: now %s; %d layers, %.2f GiB in %.3f s over %d steps",
+                m.target, m.layers, m.bytes / 2**30, m.finished - m.started, m.steps,
+            )
+
     def _complete(self) -> None:
         main = torch.cuda.current_stream()
         still = []
@@ -189,6 +208,7 @@ class SwapManager:
         recent = self.migrations[-10:]
         return {
             "target": self.target,
+            "policy": "hysteresis" if self.policy else "external",
             "layers": len(self.layers),
             "fp8_layers": fp8,
             "migrating": self.current is not None,

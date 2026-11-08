@@ -17,7 +17,13 @@ for cfg in $CONFIGS; do
   base=${cfg%%+*}
   unset VPA_MODE VPA_FORMAT VPA_THRESHOLD
   export VLLM_SERVER_DEV_MODE=1
+  unset VLLM_PLUGINS CTL_PID
   case "$base" in
+    swap-ctl)
+      # externally controlled: plugin exposes /v1/precision, controller decides
+      unset VLLM_SERVER_DEV_MODE
+      export VPA_FORMAT=swap VPA_MODE=high VLLM_PLUGINS=precision_autoscaler,precision_autoscaler_api
+      args=(--quantization precision_autoscaler) ;;
     stock-bf16) args=() ;;
     stock-fp8)  args=(--quantization fp8_per_channel) ;;
     dual-*|swap-*)
@@ -43,8 +49,14 @@ for cfg in $CONFIGS; do
   nvidia-smi --query-gpu=timestamp,utilization.gpu,memory.used,power.draw,pcie.link.gen.current,pcie.link.width.current \
     --format=csv,noheader,nounits -l 1 > "$OUT/$cfg.gpu.csv" 2>/dev/null &
   smi=$!
+  if [ "$base" = swap-ctl ]; then
+    python3 controller/precision_controller.py --url http://localhost:8000       --up "${CTL_UP:-16}" --down "${CTL_DOWN:-6}" --dwell "${CTL_DWELL:-20}"       --log "$OUT/$cfg.controller.jsonl" > "$OUT/$cfg.controller.out" 2>&1 &
+    CTL_PID=$!
+    sleep 2
+  fi
   python3 bench/phase_load.py --name "$cfg" --model "$MODEL" --phases "$PHASES" --out "$OUT" 2>&1 | tail -8
   kill $smi 2>/dev/null
+  [ -n "${CTL_PID:-}" ] && { kill $CTL_PID 2>/dev/null; echo "controller decisions:"; grep -E '"event": "(switch|migrated)"' "$OUT/$cfg.controller.jsonl" | cut -c1-220; }
   grep -E "precision_autoscaler swap: (now|migrating)" "$OUT/$cfg.server.log" | sed -E 's/.*\] //' | head -10
   kill $pid 2>/dev/null; wait $pid 2>/dev/null
   for _ in $(seq 1 30); do pgrep -f "vllm serve" >/dev/null || break; sleep 2; done

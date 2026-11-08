@@ -71,6 +71,20 @@ async def sampler(session, args, t0, samples, stop):
         except Exception:  # noqa: BLE001
             pass
         try:
+            async with session.get(f"{args.url}/v1/precision") as r:
+                api = (await r.json()) if r.status == 200 else None
+            if api is not None:
+                row.update({"target": api.get("mode"), "fp8_layers": api.get("fp8_layers"),
+                            "layers": api.get("layers"), "migrating": api.get("migrating"),
+                            "migrations": len(api.get("migrations") or [])})
+                if api.get("migrations"):
+                    row["last_migration"] = api["migrations"][-1]
+                samples.append(row)
+                await asyncio.sleep(0.5)
+                continue
+        except Exception:  # noqa: BLE001
+            pass
+        try:
             async with session.post(f"{args.url}/collective_rpc", json={"method": "vpa_stats"}) as r:
                 if r.status == 200:
                     s = (await r.json())["results"][0]

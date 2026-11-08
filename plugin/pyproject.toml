@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "vllm-precision-autoscaler"
-version = "0.2.0"
+version = "0.3.0"
 description = "vLLM plugin that switches a model between 16-bit and FP8 weights on the fly, based on load (no restart, no extra replica)."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -26,6 +26,11 @@ test = ["pytest>=8"]
 # config and the custom op so they exist before the model is built.
 [project.entry-points."vllm.general_plugins"]
 precision_autoscaler = "vllm_precision_autoscaler:register"
+
+# HTTP control API (GET/POST /v1/precision). vLLM loads endpoint plugins only
+# when named in VLLM_PLUGINS=precision_autoscaler,precision_autoscaler_api
+[project.entry-points."vllm.endpoint_plugins"]
+precision_autoscaler_api = "vllm_precision_autoscaler.api:PrecisionAPIPlugin"
 
 [tool.setuptools.packages.find]
 include = ["vllm_precision_autoscaler*"]

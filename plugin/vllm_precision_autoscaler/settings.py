@@ -26,6 +26,12 @@ engine-core and worker processes that vLLM spawns.
                                target changes (needs CUDA graphs off).
                                VPA_MODE: high | fp8 = fixed start, switch via
                                RPC; auto = hysteresis policy below
+    VPA_SWAP_POLICY   swap: external (default) | hysteresis
+                      external   = the plugin only switches when told to, via
+                                   POST /v1/precision (api.py) or vpa_set_mode;
+                                   an outside controller decides when
+                      hysteresis = optional built-in policy (VPA_SWAP_UP/DOWN/
+                                   DWELL_S/EMA_S below), started with VPA_MODE=auto
     VPA_SWAP_UP       swap+auto: go FP8 when smoothed tokens/step > this (64)
     VPA_SWAP_DOWN     swap+auto: back to 16-bit when below this (32)
     VPA_SWAP_DWELL_S  swap+auto: minimum seconds between target changes (5)
@@ -97,8 +103,11 @@ class Settings:
     swap_ema_s: float = 2.0
     swap_slots: int = 4
     swap_graphs: bool = True
+    swap_policy: str = "external"
 
     def __post_init__(self) -> None:
+        if self.swap_policy not in ("external", "hysteresis"):
+            raise ValueError(f"VPA_SWAP_POLICY must be external or hysteresis, got {self.swap_policy!r}")
         if self.format not in FORMATS:
             raise ValueError(f"VPA_FORMAT must be one of {FORMATS}, got {self.format!r}")
         if self.dial_low > self.dial_high:
@@ -123,6 +132,7 @@ class Settings:
             swap_ema_s=_float(env, "VPA_SWAP_EMA_S", 2.0),
             swap_slots=max(1, _int(env, "VPA_SWAP_SLOTS", 4)),
             swap_graphs=env.get("VPA_SWAP_GRAPHS", "1").strip().lower() not in ("0", "false", "no", "off"),
+            swap_policy=env.get("VPA_SWAP_POLICY", "external").strip().lower(),
         )
 
     def with_mode(self, mode: str, threshold: int | None = None) -> "Settings":

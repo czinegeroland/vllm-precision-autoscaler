@@ -37,9 +37,8 @@ the plugin. Three storage formats (`VPA_FORMAT`):
 - When the target precision changes, layers are copied on a side CUDA stream into small
   staging buffers, then moved into place between engine steps. The model keeps
   serving; during the ~1–4 s migration some layers are FP8 and some BF16.
-- A hysteresis policy decides the target from smoothed tokens per step
-  (`VPA_SWAP_UP`, `VPA_SWAP_DOWN`, `VPA_SWAP_DWELL_S`), or an external controller sets it
-  over vLLM's `/collective_rpc` endpoint.
+- An external controller sets the target over the plugin's HTTP API
+  (`POST /v1/precision`); vLLM itself never decides when to switch.
 - **Two CUDA graph sets.** A recorded CUDA graph stores *which kernels run on which
   addresses*, not the data, so the plugin records every decode graph twice (16-bit
   kernels and FP8 kernels on the same addresses) and replays the set that matches the
@@ -64,33 +63,56 @@ point; nothing else to configure.
 
 ## Run
 
+The plugin **executes** precision switches; deciding **when** to switch is the job of
+an external controller. Start vLLM with the plugin and its HTTP control API:
+
 ```bash
-# swap format, automatic switching, two CUDA graph sets
-VPA_FORMAT=swap VPA_MODE=auto vllm serve Qwen/Qwen3-4B \
+export VLLM_PLUGINS=precision_autoscaler,precision_autoscaler_api
+export VPA_FORMAT=swap VPA_MODE=high
+vllm serve Qwen/Qwen3-4B \
   --quantization precision_autoscaler \
   --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
 ```
 
-Watch it switch (optional telemetry endpoint):
+(`VLLM_PLUGINS` is needed because vLLM loads endpoint plugins only when they are
+allowlisted, and the allowlist then applies to all plugins, so both names are listed.)
+
+### Control API
+
+| Request | Effect |
+|---|---|
+| `GET /v1/precision` | current state: `mode`, `fp8_layers`/`layers`, `migrating`, recent `migrations` (also advances a pending migration while the engine is idle) |
+| `POST /v1/precision` `{"mode": "fp8"}` | start switching to FP8 (`"high"` = back to BF16); returns immediately, layers migrate in the background while serving |
 
 ```bash
-VLLM_SERVER_DEV_MODE=1 VPA_FORMAT=swap VPA_MODE=auto vllm serve Qwen/Qwen3-4B \
-  --quantization precision_autoscaler \
-  --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
-  --worker-extension-cls vllm_precision_autoscaler.worker_ext.PrecisionAutoscalerWorkerExtension
-
-curl -s localhost:8000/collective_rpc -d '{"method":"vpa_stats"}'
-# -> target precision, FP8 layer count, smoothed load, migration history
-curl -s localhost:8000/collective_rpc -d '{"method":"vpa_set_mode","args":["fp8"]}'   # manual control
+curl -s localhost:8000/v1/precision
+curl -s localhost:8000/v1/precision -H 'Content-Type: application/json' -d '{"mode":"fp8"}'
 ```
+
+### Reference controller
+
+`controller/precision_controller.py` (Python, stdlib only) is a minimal external
+controller: it reads `vllm:num_requests_running + waiting` from `/metrics`, applies
+its own thresholds, hold times and dwell time, and calls `POST /v1/precision`. Every
+decision is logged as a JSON line. Any other service (e.g. a C#/.NET controller,
+or a KEDA-style autoscaler) can use the same three endpoints instead.
+
+```bash
+python3 controller/precision_controller.py --url http://localhost:8000 --up 16 --down 6 --dwell 20
+```
+
+An optional built-in policy (`VPA_SWAP_POLICY=hysteresis VPA_MODE=auto`) exists for
+experiments, but in tests on Qwen3-32B its 5 s dwell made it flap while each
+migration took ~5 s; external control is the default.
 
 ### Settings (environment variables)
 
 | Variable | Default | Meaning |
 |---|---|---|
 | `VPA_FORMAT` | `dual` | `swap`, `dual` or `nested` |
-| `VPA_MODE` | `auto` | `high` (16-bit), `fp8`, `auto`; `dial` for `dual` only |
-| `VPA_SWAP_UP` / `VPA_SWAP_DOWN` | 64 / 32 | swap+auto: tokens per step (smoothed) to go to FP8 / back |
+| `VPA_MODE` | `auto` | starting precision: `high` (16-bit) or `fp8`; `auto`/`dial` for `dual` (and for `swap` only with `VPA_SWAP_POLICY=hysteresis`) |
+| `VPA_SWAP_POLICY` | `external` | swap: `external` (switch only via the API) or `hysteresis` (built-in, opt-in) |
+| `VPA_SWAP_UP` / `VPA_SWAP_DOWN` | 64 / 32 | built-in policy only: tokens per step (smoothed) to go to FP8 / back |
 | `VPA_SWAP_DWELL_S` | 5 | swap+auto: minimum seconds between precision changes |
 | `VPA_SWAP_EMA_S` | 2 | swap+auto: smoothing time constant |
 | `VPA_SWAP_SLOTS` | 4 | swap: staging buffers (each the size of the largest layer) |
@@ -111,6 +133,7 @@ curl -s localhost:8000/collective_rpc -d '{"method":"vpa_set_mode","args":["fp8"
 
 ```text
 plugin/          the pip-installable plugin (vllm_precision_autoscaler) + tests
+controller/      reference external controller (decides when to switch)
 bench/           benchmark, phased-load, quality (GSM8K) and summary scripts
 deploy/runpod/   rp.py (RunPod API: prices, create, wait, terminate) and pod.sh
 deploy/pod/      scripts that run on a GPU pod (setup, tests)

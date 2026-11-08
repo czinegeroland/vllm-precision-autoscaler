@@ -104,6 +104,9 @@ def set_mode(mode: str, threshold: int | None = None) -> None:
     settings = settings.with_mode(mode, threshold)
     if swap_manager is not None:
         if settings.mode == "auto":
+            if settings.swap_policy != "hysteresis":
+                raise ValueError("swap format is externally controlled: set mode high or fp8 "
+                                 "(or start vLLM with VPA_SWAP_POLICY=hysteresis)")
             if swap_manager.policy is None:
                 from .swap_policy import HysteresisPolicy
 

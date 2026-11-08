@@ -79,6 +79,9 @@ class PrecisionAutoscalerConfig(QuantizationConfig):
         if isinstance(layer, LinearBase):
             if not state.num_layers_hint:
                 state.num_layers_hint = _num_hidden_layers()
+                from .worker_ext import attach_to_worker
+
+                attach_to_worker()
                 if state.settings.format == "swap":
                     _setup_swap_cudagraphs()
             from .linear import PrecisionAutoscalerLinearMethod
