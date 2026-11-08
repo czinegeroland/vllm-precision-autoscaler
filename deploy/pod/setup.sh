@@ -33,7 +33,7 @@ pip_install() {
 if [ "${VPA_INSTALL:-git}" = local ]; then
   pip_install --no-deps -e plugin                      # development: the checkout on the pod
 else
-  REF="${VPA_REF:-v0.2.0}"
+  REF="${VPA_REF:-main}"
   pip_install --no-deps "git+https://github.com/czinegeroland/vllm-precision-autoscaler@${REF}#subdirectory=plugin"
 fi
 pip_install pytest

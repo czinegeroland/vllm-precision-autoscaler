@@ -55,7 +55,7 @@ the plugin. Three storage formats (`VPA_FORMAT`):
 ## Install
 
 ```bash
-pip install --no-deps "git+https://github.com/czinegeroland/vllm-precision-autoscaler@v0.2.0#subdirectory=plugin"
+pip install --no-deps "git+https://github.com/czinegeroland/vllm-precision-autoscaler@main#subdirectory=plugin"
 ```
 
 `--no-deps` keeps your existing vLLM install untouched (the plugin declares no

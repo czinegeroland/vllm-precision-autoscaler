@@ -4,7 +4,7 @@ vLLM plugin that switches a model between 16-bit and FP8 weights on the fly, bas
 load. See the main README and docs/FINDINGS.md at
 https://github.com/czinegeroland/vllm-precision-autoscaler
 
-    pip install --no-deps "git+https://github.com/czinegeroland/vllm-precision-autoscaler@v0.2.0#subdirectory=plugin"
+    pip install --no-deps "git+https://github.com/czinegeroland/vllm-precision-autoscaler@main#subdirectory=plugin"
     VPA_FORMAT=swap VPA_MODE=auto vllm serve Qwen/Qwen3-4B --quantization precision_autoscaler \
         --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
 

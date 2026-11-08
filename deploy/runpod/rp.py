@@ -198,7 +198,7 @@ def main() -> None:
     c.add_argument("--name", default="vpa-dev")
     c.add_argument("--disk", type=int, default=60)
     c.add_argument("--min-ram", type=int, default=32, help="GB of system RAM per GPU")
-    c.add_argument("--ref", default="v0.2.0", help="git tag/branch the pod clones")
+    c.add_argument("--ref", default="main", help="git branch/tag the pod clones")
     c.add_argument("--any-cuda", action="store_true", help="drop the host CUDA version filter")
     c.set_defaults(fn=cmd_create)
     for name, fn in (("wait", cmd_wait), ("status", cmd_status), ("stop", cmd_stop),
