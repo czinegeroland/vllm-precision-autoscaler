@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vllm-precision-autoscaler"
+version = "0.2.0"
+description = "vLLM plugin that switches a model between 16-bit and FP8 weights on the fly, based on load (no restart, no extra replica)."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+authors = [{ name = "Roland Czinege" }]
+# vLLM is deliberately not listed: the plugin runs inside an existing vLLM
+# install (e.g. the vllm/vllm-openai image) and must not pull another copy.
+dependencies = []
+
+[project.urls]
+Repository = "https://github.com/czinegeroland/vllm-precision-autoscaler"
+Findings = "https://github.com/czinegeroland/vllm-precision-autoscaler/blob/main/docs/FINDINGS.md"
+
+[project.optional-dependencies]
+test = ["pytest>=8"]
+
+# vLLM loads every `vllm.general_plugins` entry point in all of its processes
+# (API server, engine core, workers). register() imports the quantization
+# config and the custom op so they exist before the model is built.
+[project.entry-points."vllm.general_plugins"]
+precision_autoscaler = "vllm_precision_autoscaler:register"
+
+[tool.setuptools.packages.find]
+include = ["vllm_precision_autoscaler*"]
