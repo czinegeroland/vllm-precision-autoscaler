@@ -803,3 +803,99 @@ with no custom kernel and no change to vLLM's source:
   total graph memory, both sets); startup ~2.5 min (compile cache disabled +
   two captures); runtime patching of vLLM's graph manager, so the plugin is
   tied to vLLM v0.32.0; prefill steps still run without graphs.
+
+## 11. H100 NVL + Qwen3-32B (run 5, 2026-11-08/09)
+
+Pod `q8ngw7sfngt7j7`, RunPod **Community H100 NVL (94 GB)**, $2.59/h, 40 min ≈
+**$1.73**; total spend ≈ **$5.6**. (H100 PCIe was out of stock.) Driver 570, 1.5 TB
+host RAM. **No SSH copying:** the pod cloned the public repo (`main`) at boot and
+installed the plugin with `pip install git+…@main#subdirectory=plugin`; later the
+v0.3.0 control API was pushed to GitHub and the pod re-installed from `main`.
+Files: `results/bench_h100/`, `results/manual/`.
+
+### 11.1 Memory: the dual format can't load a 32B model, swap can
+
+| Config | Weights in VRAM | KV cache (tokens) |
+|---|---|---|
+| dual (BF16 + FP8 in VRAM) | ~91.5 GiB | **fails: CUDA out of memory** during torch.compile (31 MiB free of 93 GiB) |
+| stock BF16 (`FULL_DECODE_ONLY`) | 61.0 GiB | 81,840 |
+| stock FP8 | 33.6 GiB | 193,296 |
+| **swap** | **62.0 GiB** (one copy) | **77,008** (94% of stock BF16; staging 2 × 500 MiB) |
+
+Swap pinned **87.2 GiB** of CPU RAM (both copies, 256 linear layers). Load time 75 s
+(stock: 11 s).
+
+### 11.2 Steady benchmark (512 in / 256 out, tok/s)
+
+| Users | stock BF16 | stock FP8 | swap, built-in policy (default 5 s dwell) |
+|---|---|---|---|
+| 1 | 37.1 | 63.7 | 38.5 |
+| 8 | 257.8 | 436.6 | 248.0 |
+| 16 | 478.5 | 820.0 | 479.2 |
+| 32 | 692.2 | 1,181.4 | 941.9 |
+
+p95 TTFT at 32 users: BF16 3,232 ms · FP8 1,642 ms · swap 3,343 ms.
+
+- **FP8 matters far more on 32B: +69–72% at every user count** (4B: +16–31%).
+- Swap in 16-bit = stock BF16 (38.5 vs 37.1 tok/s at 1 user).
+- **The built-in policy failed on 32B: it flapped.** With 8 and 16 users it switched
+  every ~5 s (its minimum dwell), several migrations were reversed half-way, and
+  each migration took 4–8 s (256 layers, at most 2 per engine step with 2 staging
+  slots). Steps during a migration run without CUDA graphs, so swap got *neither*
+  speed: 248 vs 258 (BF16) vs 437 (FP8) tok/s at 8 users. At 32 users it stayed in
+  FP8 (942 tok/s, +36% vs BF16).
+- **Idle stall:** a migration only advances on engine steps; one started right
+  before the engine went idle took **43.9 s** (145 steps). With traffic: 4–5 s.
+
+**Design decision (user): vLLM must not decide when to switch.** v0.3.0 makes
+external control the default: the plugin exposes `GET/POST /v1/precision`
+(a vLLM endpoint plugin, no dev mode), the built-in policy is opt-in
+(`VPA_SWAP_POLICY=hysteresis`), and `GET` also advances a pending migration
+while the engine is idle (fixes the idle stall for any polling controller).
+
+### 11.3 Manually controlled switching through the API (v0.3.0)
+
+Server: `VLLM_PLUGINS=precision_autoscaler,precision_autoscaler_api VPA_FORMAT=swap
+VPA_MODE=high` (no dev mode, no worker-extension flag, no built-in policy). Load:
+4 users 45 s → **32 users 90 s** → 4 users 75 s; switches sent by us with `curl` at
+the phase boundaries (`results/manual/switches.log`):
+
+| UTC | Action / state |
+|---|---|
+| 23:34:15 | server ready: `mode=high, fp8_layers 0/256` |
+| **23:35:00** | **`POST {"mode":"fp8"}`** as the 32 users arrive → migrating |
+| 23:35:09 | **fully FP8: 29.06 GiB in 8.0 s (143 steps)**; 36 running, 0 waiting, KV 31% |
+| 23:35:09–23:36:30 | stays FP8 (no flapping): 31–32 running, 0 waiting, KV 29–31% |
+| **23:36:30** | **`POST {"mode":"high"}`** at the end of the busy phase |
+| 23:36:36 | mid-migration: 52/256 layers still FP8, 36 running |
+| 23:36:38 | **fully 16-bit: 58.12 GiB from CPU RAM in 7.2 s (218 steps)** |
+
+| Phase | tok/s | p50 / p95 TTFT | token gap p50 / p99 / max |
+|---|---|---|---|
+| quiet (4) | 138 | 438 / 446 ms | 27.0 / 39.3 / 1,639 ms |
+| busy (32), FP8 | 937 | 2,284 / 3,329 ms | 22.8 / 44.2 / 1,639 ms |
+| quiet (4) | 225* | 445 / 450 ms | 27.6 / 40.2 / 328 ms |
+
+\*includes busy requests finishing.
+
+- The API works end to end: a controller (here: us) decides, the plugin executes,
+  `GET` shows the live state; both directions migrate while serving with 0 queued
+  requests.
+- **One 1.6 s stall** at t = 45.1 s, the moment 32 requests (16k prompt tokens) arrived
+  *and* the FP8 migration started. The stock-BF16 phased baseline on this host was
+  cancelled to save money, so this run can't separate burst-prefill stall from
+  migration stall. The switch back (7.2 s) caused no gap above 328 ms.
+- Busy-phase FP8 throughput 937 tok/s matches the steady swap result (942) but is
+  below stock FP8 (1,181), and TTFT is high (p50 2.3 s). Likely cause: in the swap
+  format, prefill steps run without CUDA graphs (`FULL_DECODE_ONLY`) and through the
+  plugin's per-layer Python; on 32B with long prompts prefill is a large share of the
+  work. Quiet-phase TTFT (438 ms for a 512-token prompt) points the same way.
+
+### 11.4 Open items after run 5
+
+1. **Prefill performance in the swap format** (TTFT 438 ms quiet, 2.3 s busy): reduce
+   per-layer Python in eager steps, or allow piecewise graphs for the current precision.
+2. **Migration speed:** copy more than 2 layers per step / continue copying between
+   steps; 256 layers at 2 per step is the bottleneck on 32B.
+3. Stock-BF16 phased baseline on the H100 (to attribute the 1.6 s stall).
+4. External controller in C#/.NET using `GET /metrics` + `/v1/precision`.
