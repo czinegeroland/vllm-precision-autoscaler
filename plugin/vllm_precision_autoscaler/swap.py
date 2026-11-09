@@ -30,6 +30,10 @@ import torch
 
 from .swap_policy import HysteresisPolicy
 
+# pump() treats the engine as idle when no step ran for this long, and then
+# finishes a pending migration in one go instead of one batch per call.
+IDLE_AFTER_S = 0.2
+
 
 @dataclass
 class SwapLayer:
@@ -89,6 +93,7 @@ class SwapManager:
         self.migrations: list[Migration] = []
         self.current: Migration | None = None
         self.steps = 0
+        self.last_step_t = 0.0  # monotonic time of the last engine step
 
     # -- setup ---------------------------------------------------------------
     def register(self, layer: SwapLayer) -> None:
@@ -152,6 +157,7 @@ class SwapManager:
     # -- called once per engine step (from the first swap layer's op) ---------
     def on_step(self, num_tokens: int) -> None:
         self.steps += 1
+        self.last_step_t = time.monotonic()
         if self.policy is not None:
             new = self.policy.update(time.monotonic(), num_tokens)
             if new != self.target:
@@ -167,8 +173,25 @@ class SwapManager:
         which vLLM runs between steps). Lets a migration finish while idle."""
         if self.current is None and not self.inflight and not self._pending():
             return
+        if time.monotonic() - self.last_step_t > IDLE_AFTER_S:
+            self._drain()  # engine idle: nothing to protect, finish now
+            return
         self._complete()
         self._launch()
+        self._maybe_finish()
+
+    def _drain(self, budget_s: float = 30.0) -> None:
+        """Finish the whole migration now, waiting for each copy. Only used
+        when no engine step ran recently (pump() from an RPC while idle):
+        vLLM runs RPCs between steps, so blocking here delays no request
+        that is already running; a new one waits at most until this returns."""
+        deadline = time.monotonic() + budget_s
+        while (self.inflight or self._pending()) and time.monotonic() < deadline:
+            self._launch()
+            if self.side is not None:
+                self.side.synchronize()
+            self._complete()
+        torch.cuda.current_stream().synchronize()
         self._maybe_finish()
 
     def _complete(self) -> None:
