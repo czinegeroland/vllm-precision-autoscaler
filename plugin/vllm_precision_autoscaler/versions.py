@@ -144,6 +144,18 @@ class Int4Kind:
         from vllm.scalar_type import scalar_types
 
         w = region[: n * k // 2].view(torch.int32).view(k // 16, 2 * n)
+        if bias is not None:
+            # Marlin adds the bias in its own column order: permute once per
+            # layer (the bias is a fixed parameter) and reuse it.
+            cached = aux.get("_bias")
+            if cached is None or cached[0] != bias.data_ptr():
+                from vllm.model_executor.layers.quantization.utils.marlin_utils import (
+                    marlin_permute_bias,
+                )
+
+                cached = (bias.data_ptr(), marlin_permute_bias(bias))
+                aux["_bias"] = cached
+            bias = cached[1]
         return apply_gptq_marlin_linear(
             input=x, weight=w, weight_scale=aux["scale"], weight_zp=aux["zp"],
             workspace=get_marlin_workspace(x.device), wtype=scalar_types.uint4b8,
