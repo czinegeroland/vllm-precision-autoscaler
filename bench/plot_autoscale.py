@@ -24,9 +24,19 @@ from plot_showcase import (BASE, INK, INK2, SURFACE, VERSION_LABEL, active_versi
                            throughput, version_spans, windowed)
 
 
-def per_user(records, end, window=5.0):
-    g = gaps_by_time(records)
-    return windowed(g, end, window, 1.0, lambda v: 1.0 / statistics.median(v))
+def request_speeds(records, min_tokens=16):
+    """[(t_finish, tokens/s)] per request: decode speed the user saw while streaming."""
+    out = []
+    for r in records:
+        tt = r["token_times"]
+        if len(tt) >= min_tokens and tt[-1] > tt[0]:
+            out.append((tt[-1], (len(tt) - 1) / (tt[-1] - tt[0])))
+    out.sort()
+    return out
+
+
+def per_user(records, end, window=10.0):
+    return windowed(request_speeds(records), end, window, 1.0, statistics.median)
 
 
 def switch_marks(ax, data):
@@ -40,18 +50,53 @@ def switch_marks(ax, data):
 
 def steps(data, target):
     rows = []
-    g = gaps_by_time(data["records"])
+    speeds = request_speeds(data["records"])
     for a, b, users in phase_bounds(data):
         lo = a + 10  # skip the ramp into each step
-        vals = [v for x, v in g if lo <= x < b]
+        vals = [v for x, v in speeds if lo <= x < b]
         ss = [s for s in data["samples"] if lo <= s["t"] < b]
         vers = [active_version(s) for s in ss if active_version(s)]
         main = max(set(vers), key=vers.count) if vers else None
-        tok = 1.0 / statistics.median(vals) if vals else None
+        tok = statistics.median(vals) if vals else None
         rows.append({"start_s": a, "users": users, "version": VERSION_LABEL.get(main, "-"),
                      "per_user_tok_s": round(tok, 1) if tok else None,
                      "meets_target": bool(tok and tok >= target)})
     return rows
+
+
+def users_chart(base, auto, target, path):
+    b_rows, a_rows = steps(base, target), steps(auto, target)
+    up = [i for i in range(len(b_rows)) if i == 0 or b_rows[i]["users"] > b_rows[i - 1]["users"]]
+    xs = [b_rows[i]["users"] for i in up]
+    yb = [b_rows[i]["per_user_tok_s"] for i in up]
+    ya = [a_rows[i]["per_user_tok_s"] for i in up]
+    va = [a_rows[i]["version"] for i in up]
+    fig, ax = plt.subplots(figsize=(9, 5.2))
+    ax.plot(xs, yb, color=BASE, ls="--", lw=1.8, marker="o", ms=8, label="16-bit only")
+    ax.plot(xs, ya, color=INK, lw=2.2, marker="o", ms=8, label="autoscaled precision")
+    for x, y, v in zip(xs, ya, va):
+        ax.annotate(v, (x, y), xytext=(0, 10), textcoords="offset points", ha="center",
+                    fontsize=9.5, color=INK)
+    for x, y in zip(xs, yb):
+        ax.annotate(f"{y:.0f}", (x, y), xytext=(0, -16), textcoords="offset points", ha="center",
+                    fontsize=9, color=INK2)
+    held_b = max([x for x, y in zip(xs, yb) if y >= target], default=0)
+    held_a = max([x for x, y in zip(xs, ya) if y >= target], default=0)
+    fig.subplots_adjust(top=0.83)
+    fig.suptitle("Per-user speed as users grow (tokens/s each user receives, median)",
+                 x=0.125, ha="left", fontsize=13, fontweight="bold", color=INK, y=0.97)
+    fig.text(0.125, 0.895, f"Target {target:.0f} tok/s per user: 16-bit only holds it up to {held_b} users, "
+             f"autoscaled precision up to {held_a}", fontsize=10.5, color=INK2)
+    ax.axhline(target, color=INK2, lw=1.2, ls=":", zorder=1)
+    ax.text(xs[0], target, f"target {target:.0f}", va="bottom", ha="left", fontsize=9.5,
+            color=INK2)
+    ax.set_xlabel("concurrent users")
+    ax.set_xticks(xs)
+    ax.set_ylim(0, max(ya + yb) * 1.18)
+    legend(ax)
+    ax.legend(loc="lower left", frameon=False, fontsize=9.5, labelcolor=INK2)
+    fig.savefig(path, dpi=170, bbox_inches="tight")
+    plt.close(fig)
 
 
 def main():
@@ -69,7 +114,7 @@ def main():
     fig, axes = plt.subplots(3, 1, figsize=(10, 9), sharex=True, gridspec_kw={"hspace": 0.45,
                                                                                "height_ratios": [1, 1.6, 1.1]})
     fig.subplots_adjust(top=0.87)
-    fig.suptitle("More users, same per-user speed: precision autoscaling in vLLM",
+    fig.suptitle("More users, (almost) the same per-user speed",
                  x=0.06, ha="left", fontsize=15, fontweight="bold", color=INK, y=0.985)
     fig.text(0.06, 0.935, f"{auto['model'].split('/')[-1]} on one RTX 4090. Background = precision "
              "chosen by the controller; dashed lines = switches", fontsize=10, color=INK2)
@@ -92,7 +137,8 @@ def main():
     ax.axhline(args.target, color=INK2, lw=1.2, ls=":", zorder=2)
     ax.text(end, args.target, f" target {args.target:.0f}", va="center", ha="left", fontsize=9.5,
             color=INK2)
-    ax.set_title("Per-user speed: tokens/s each user receives (median over 5 s; higher is better)")
+    ax.set_title("Per-user speed: tokens/s each user receives while streaming "
+                 "(median of requests, 10 s; higher is better)")
     ax.set_ylim(bottom=0)
     legend(ax)
 
@@ -114,6 +160,8 @@ def main():
     out.mkdir(parents=True, exist_ok=True)
     fig.savefig(out / "autoscale-hero.png", dpi=170, bbox_inches="tight")
     plt.close(fig)
+
+    users_chart(base, auto, args.target, out / "autoscale-users.png")
 
     rows = []
     for name, d in (("16-bit only", base), ("autoscaled", auto)):

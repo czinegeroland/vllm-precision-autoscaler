@@ -1,0 +1,19 @@
+run,start_s,users,version,per_user_tok_s,meets_target
+16-bit only,0.0,4,16-bit,97.7,True
+16-bit only,40.0,8,16-bit,91.0,True
+16-bit only,80.0,16,16-bit,82.4,True
+16-bit only,120.0,32,16-bit,66.4,True
+16-bit only,180.0,48,16-bit,54.1,False
+16-bit only,240.0,64,16-bit,47.3,False
+16-bit only,300.0,32,16-bit,66.3,True
+16-bit only,340.0,16,16-bit,81.6,True
+16-bit only,380.0,4,16-bit,98.3,True
+autoscaled,0.0,4,16-bit,98.5,True
+autoscaled,40.0,8,16-bit,91.5,True
+autoscaled,80.0,16,16-bit,81.7,True
+autoscaled,120.0,32,FP8,79.4,True
+autoscaled,180.0,48,INT4,74.8,True
+autoscaled,240.0,64,INT4,55.9,False
+autoscaled,300.0,32,FP8,88.3,True
+autoscaled,340.0,16,16-bit,100.8,True
+autoscaled,380.0,4,16-bit,98.3,True

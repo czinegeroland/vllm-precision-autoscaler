@@ -1195,3 +1195,62 @@ Migrations under load: → INT4 **0.21 s** (1.69 GiB), → FP8 **0.56 s** (3.38 
   signal for decode; tokens/s, TPOT and KV usage are.
 - Closed-loop clients synchronize at 128 users (all send 256-token requests), so
   throughput oscillates with a ~10 s period; charts use a 10 s average.
+
+
+## 18. Precision autoscaling with a controller + Prometheus/Grafana (run 12, 2026-11-09)
+
+Pod `dwkqbpxi2vudvz`, RunPod Secure RTX 4090 (**48 GB variant**: same compute, more KV cache:
+243,824 tokens), $0.89/h, 30 min ≈ **$0.44**; total ≈ **$8.97**. Qwen3-4B, plugin v0.6.0.
+Scripts: `bench/run_autoscale.sh`, `controller/precision_controller.py` +
+`controller/config.example.yaml`, `deploy/pod/observability.sh`, `bench/prom_export.py`,
+`bench/plot_autoscale.py`. Charts: `docs/img/autoscale-hero.png`, `docs/img/autoscale-users.png`.
+Data (local, gitignored): `results/autoscale/` (per-request token timestamps, 0.5 s telemetry,
+controller decisions, Prometheus export) and `results/prometheus-snapshot/` (full TSDB).
+
+**Setup (one pod, no Kubernetes):** vLLM + plugin (16-bit/FP8/INT4 in pinned RAM);
+the plugin serves `GET /v1/precision/metrics`; a Python controller reads vLLM `/metrics`
+every 0.5 s and POSTs `/v1/precision`; Prometheus (2 s scrape) + Grafana (provisioned
+dashboard, RunPod proxy port 3000) + node_exporter + nvidia_gpu_exporter as plain binaries.
+Same user ramp twice on the same server: 4 → 8 → 16 → 32 → 48 → 64 → 32 → 16 → 4 users
+(closed loop, 512-token prompts, 256 output tokens). Run 1: 16-bit only. Run 2: controller on.
+
+**Controller policy:** step down 16-bit → FP8 at ≥ 24 users, FP8 → INT4 at ≥ 40 (hold 2 s);
+step up INT4 → FP8 at ≤ 32, FP8 → 16-bit at ≤ 16 (hold 20 s); dwell 10 s; guard: per-user
+tok/s below 60 for 8 s → one more step down.
+
+**Decisions (run 2):** 32 users → FP8 (0.45 s migration), 48 → INT4 (0.25 s), back to 32 →
+FP8 after 20 s (0.48 s), 16 → 16-bit after 20 s (0.87 s). No flapping.
+
+**Per-user speed** (median decode speed of requests finishing in each step, first 10 s skipped):
+
+| Users | 16-bit only | Autoscaled | Version |
+|---|---|---|---|
+| 4 | 97.7 | 98.5 | 16-bit |
+| 8 | 91.0 | 91.5 | 16-bit |
+| 16 | 82.4 | 81.7 | 16-bit |
+| 32 | 66.4 | **79.4** | FP8 |
+| 48 | 54.1 ✗ | **74.8** | INT4 |
+| 64 | 47.3 ✗ | 55.9 ✗ | INT4 |
+
+- **Target 60 tok/s per user: 16-bit only holds it up to 32 users, autoscaled up to 48 (+50% users)**
+  on the same GPU. At 48 users each user gets 38% more speed (74.8 vs 54.1).
+- Requests completed in the 7.5-minute ramp: **3156 vs 2660 (+19%)**.
+- At 64 users no precision holds 60 tok/s on this GPU: that is where a second replica is needed.
+  Precision is the instant first step (0.25–0.9 s), before scaling out (minutes).
+- Quiet periods run in 16-bit (full quality); the cost is paid only under load
+  (GSM8K: FP8 −1.1, INT4 −3.8 points, §16).
+
+**Lesson: don't control on vLLM's inter-token-latency histogram.** First attempt used
+`1 / median(vllm:inter_token_latency_seconds)`. Its buckets jump from 10 ms to 25 ms, so
+everything between 40 and 100 tok/s per user is one bucket; a real ~10 ms gap read as
+"58 tok/s" and the controller stepped down at 4 users, then flapped back after 20 s
+(`results/autoscale/controller.attempt1.jsonl`). Fix: per-user tok/s =
+`rate(vllm:generation_tokens_total) / avg(num_requests_running)` (exact, from a counter);
+the controller also clears its window after a switch. The Grafana panel uses the same formula.
+
+**Second lesson: measure per-user speed per request.** A short-window median of token gaps
+spikes when several tokens arrive in one network chunk (gap ≈ 0). The charts use each
+request's own decode speed ((tokens − 1) / streaming time), which is what a user sees.
+
+Note on the hardware: this 4090 had 48 GB. Decode speed matches the 24 GB card (same chip),
+but the KV cache is 2.7× larger, so there was no queueing at 64 users.
