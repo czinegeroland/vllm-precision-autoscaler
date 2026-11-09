@@ -288,6 +288,9 @@ class SwapManager:
             "migrating": self.current is not None,
             "ema_tokens_per_step": self.policy.ema if self.policy else None,
             "steps": self.steps,
+            "migrations_total": len(self.migrations),
+            "migration_seconds_total": sum((m.finished or 0) - m.started
+                                           for m in self.migrations if m.finished),
             "migrations": [
                 {"target": m.target, "seconds": (m.finished or 0) - m.started, "layers": m.layers,
                  "gib": m.bytes / 2**30, "steps": m.steps, "transfers": m.transfers}

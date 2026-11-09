@@ -1,0 +1,22 @@
+# Prometheus for one vLLM pod. vLLM's own example scrapes every 5 s; we use 2 s
+# because precision switches take well under a second.
+global:
+  scrape_interval: 2s
+  evaluation_interval: 10s
+
+scrape_configs:
+  - job_name: vllm                 # vLLM's built-in metrics (requests, latency, KV cache)
+    static_configs: [{targets: ["localhost:8000"]}]
+
+  - job_name: precision            # plugin: active version, migrations, weights in VRAM
+    metrics_path: /v1/precision/metrics
+    static_configs: [{targets: ["localhost:8000"]}]
+
+  - job_name: controller           # controller: users, per-user tok/s, decisions
+    static_configs: [{targets: ["localhost:9101"]}]
+
+  - job_name: gpu                  # nvidia_gpu_exporter (nvidia-smi based; DCGM needs host access)
+    static_configs: [{targets: ["localhost:9835"]}]
+
+  - job_name: node                 # node_exporter: host CPU and RAM
+    static_configs: [{targets: ["localhost:9100"]}]

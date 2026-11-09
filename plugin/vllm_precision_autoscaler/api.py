@@ -10,6 +10,8 @@ Routes:
     GET  /v1/precision                    -> active version, all configured versions,
                                              migration state (also finishes a pending
                                              migration while the engine is idle)
+    GET  /v1/precision/metrics            -> the same state in Prometheus text format
+                                             (scrape it next to vLLM's /metrics)
     POST /v1/precision {"version": "fp8"} -> start switching to that version
                                              ("mode" is accepted as an alias);
                                              400 for a version that isn't configured
@@ -21,6 +23,7 @@ The routes reach the engine through `engine_client.collective_rpc`, calling the
 from __future__ import annotations
 
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import PlainTextResponse
 
 
 class PrecisionAPIPlugin:
@@ -33,6 +36,13 @@ class PrecisionAPIPlugin:
             client = _client(raw_request)
             results = await client.collective_rpc("vpa_pump")
             return _summary(results)
+
+        @app.get("/v1/precision/metrics")
+        async def precision_metrics(raw_request: Request):
+            client = _client(raw_request)
+            results = await client.collective_rpc("vpa_pump")
+            return PlainTextResponse(prometheus_text(results[0] if results else {}),
+                                     media_type="text/plain; version=0.0.4")
 
         @app.post("/v1/precision")
         async def set_precision(raw_request: Request):
@@ -81,3 +91,46 @@ def _summary(results) -> dict:
         "migrations": swap.get("migrations", []),
         "workers": len(results),
     }
+
+
+def prometheus_text(stats: dict) -> str:
+    """Plugin state as Prometheus metrics (prefix vpa_)."""
+    swap = (stats or {}).get("swap") or {}
+    versions = swap.get("versions") or []
+    layers = swap.get("layers") or 0
+    out: list[str] = []
+
+    def metric(name, kind, help_, samples):
+        out.append(f"# HELP {name} {help_}")
+        out.append(f"# TYPE {name} {kind}")
+        for labels, value in samples:
+            lab = ",".join(f'{k}="{v}"' for k, v in labels.items())
+            out.append(f"{name}{{{lab}}} {value}" if lab else f"{name} {value}")
+
+    target = swap.get("target")
+    bits = {v["name"]: v.get("bits", 0) for v in versions}
+    active = max(versions, key=lambda v: v["active_layers"])["name"] if versions else None
+    metric("vpa_target_bits", "gauge", "Bits of the requested precision version (16, 8, 4).",
+           [({}, bits.get(target, 0))])
+    metric("vpa_active_bits", "gauge", "Bits of the version most layers currently hold.",
+           [({}, bits.get(active, 0))])
+    metric("vpa_version_target", "gauge", "1 for the requested version.",
+           [({"version": v["name"]}, int(v["name"] == target)) for v in versions])
+    metric("vpa_version_active_layers", "gauge", "Layers currently holding each version.",
+           [({"version": v["name"]}, v["active_layers"]) for v in versions])
+    metric("vpa_version_ram_bytes", "gauge", "Pinned host RAM held by each version.",
+           [({"version": v["name"]}, int(v["ram_gib"] * 2**30)) for v in versions])
+    weights = sum(v["ram_gib"] * v["active_layers"] / layers for v in versions) if layers else 0
+    metric("vpa_weights_vram_bytes", "gauge", "Bytes of weights of the active precision in VRAM.",
+           [({}, int(weights * 2**30))])
+    metric("vpa_migrating", "gauge", "1 while layers are being migrated.",
+           [({}, int(bool(swap.get("migrating"))))])
+    metric("vpa_migrations_total", "counter", "Finished and started precision migrations.",
+           [({}, swap.get("migrations_total", len(swap.get("migrations") or [])))])
+    metric("vpa_migration_seconds_total", "counter", "Total time spent migrating.",
+           [({}, round(swap.get("migration_seconds_total", 0.0), 4))])
+    last = (swap.get("migrations") or [None])[-1]
+    if last:
+        metric("vpa_last_migration_seconds", "gauge", "Duration of the last migration.",
+               [({"version": last["target"]}, round(last["seconds"], 4))])
+    return "\n".join(out) + "\n"

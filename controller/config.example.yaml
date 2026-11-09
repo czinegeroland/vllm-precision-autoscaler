@@ -1,0 +1,20 @@
+# Precision controller config (controller/precision_controller.py).
+# Values for Qwen3-4B on one RTX 4090, from the load sweep in docs/FINDINGS.md §15:
+# per-user tok/s at 32 users: 16-bit 65, FP8 78, INT4 105; at 64 users: 44 / 52 / 55.
+url: http://localhost:8000
+
+# precision versions, best quality first (must be configured in VPA_VERSIONS)
+ladder: [high, fp8, int4]
+
+# users = running + waiting requests
+step_down_users: [24, 40]   # high -> fp8 at >= 24 users, fp8 -> int4 at >= 40
+step_up_users:   [16, 32]   # int4 -> fp8 at <= 32 users, fp8 -> high at <= 16
+hold_down_s: 2              # react fast to rising load
+hold_up_s: 20               # return to higher quality only when load stays low
+dwell_s: 10                 # at least this long between switches
+
+# guard: per-user tokens/s target (1 / median time between tokens)
+slo_tok_s: 60
+slo_hold_s: 8               # below target this long -> step down one more level
+window_s: 10                # window for the median
+interval_s: 0.5

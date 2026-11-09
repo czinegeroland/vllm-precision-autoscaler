@@ -127,7 +127,7 @@ def cmd_create(args) -> None:
         "minRAMPerGPU": args.min_ram,
         "containerDiskInGb": args.disk,
         "volumeInGb": 0,
-        "ports": ["22/tcp", "8000/http"],
+        "ports": ["22/tcp", "8000/http", "3000/http"],
         "env": {"PUBLIC_KEY": pub.read_text().strip(), "VPA_REF": args.ref},
         "dockerEntrypoint": ["bash", "-c"],
         "dockerStartCmd": [BOOTSTRAP],
