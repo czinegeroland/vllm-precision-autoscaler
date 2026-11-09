@@ -29,7 +29,13 @@ class PrecisionAutoscalerWorkerExtension:
         return state.stats()
 
     def vpa_set_mode(self, mode: str, threshold: str = "") -> dict:
-        state.set_mode(mode, int(threshold) if threshold else None)
+        try:
+            if state.swap_manager is not None and mode.strip().lower() != "auto":
+                state.set_version(mode)  # any configured version: high, fp8, ...
+            else:
+                state.set_mode(mode, int(threshold) if threshold else None)
+        except ValueError as e:
+            return {"error": str(e), **state.stats()}
         if state.swap_manager is not None:
             state.swap_manager.pump()  # start the copies right away
         return state.stats()

@@ -33,7 +33,9 @@ from typing import Any
 
 from . import state
 
-PRECISIONS = ("high", "fp8")
+def _versions() -> tuple:
+    mgr = state.swap_manager
+    return mgr.version_names if mgr is not None else ("high", "fp8")
 _installed = False
 
 
@@ -48,12 +50,12 @@ class PrecisionGraphs(MutableMapping):
     """Drop-in for vLLM's `dict[BatchExecutionDescriptor, CUDAGraph]`."""
 
     def __init__(self, initial: dict | None = None) -> None:
-        self.sets: dict[str, dict] = {p: {} for p in PRECISIONS}
+        self.sets: dict[str, dict] = {}
         if initial:
-            self.sets["high"].update(initial)
+            self.sets.setdefault("high", {}).update(initial)
 
     def _cur(self) -> dict:
-        return self.sets[current_precision()]
+        return self.sets.setdefault(current_precision(), {})
 
     def __getitem__(self, key: Any) -> Any:
         return self._cur()[key]
@@ -104,7 +106,7 @@ def install() -> None:
             # vLLM's memory-profiling pass (throwaway graphs): one set is enough.
             return orig_capture(self, *args, **kwargs)
         try:
-            for prec in PRECISIONS:
+            for prec in _versions():
                 state.capture_precision = prec
                 orig_capture(self, *args, **kwargs)
         finally:

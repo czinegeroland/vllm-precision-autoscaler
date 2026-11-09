@@ -93,6 +93,14 @@ def record(layer_id: int, fp8: bool, num_tokens: int) -> None:
     row[FP8_TOKENS if fp8 else HIGH_TOKENS].add_(num_tokens)
 
 
+def set_version(name: str) -> None:
+    """Swap format: switch to a precision version (external control)."""
+    if swap_manager is None:
+        raise ValueError("precision versions exist only with VPA_FORMAT=swap")
+    swap_manager.policy = None  # an explicit choice overrides the opt-in policy
+    swap_manager.set_target(name)
+
+
 def set_mode(mode: str, threshold: int | None = None) -> None:
     """Change the policy at runtime.
 

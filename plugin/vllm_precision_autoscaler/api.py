@@ -7,9 +7,12 @@ variable then also allowlists general plugins, so name both:
     VLLM_PLUGINS=precision_autoscaler,precision_autoscaler_api vllm serve ...
 
 Routes:
-    GET  /v1/precision                 -> current state (also advances a pending
-                                          migration while the engine is idle)
-    POST /v1/precision {"mode": "fp8"} -> start switching to fp8 | high; returns state
+    GET  /v1/precision                    -> active version, all configured versions,
+                                             migration state (also finishes a pending
+                                             migration while the engine is idle)
+    POST /v1/precision {"version": "fp8"} -> start switching to that version
+                                             ("mode" is accepted as an alias);
+                                             400 for a version that isn't configured
 
 The routes reach the engine through `engine_client.collective_rpc`, calling the
 `vpa_*` worker methods that the general plugin attaches (worker_ext.py).
@@ -18,8 +21,6 @@ The routes reach the engine through `engine_client.collective_rpc`, calling the
 from __future__ import annotations
 
 from fastapi import FastAPI, HTTPException, Request
-
-MODES = ("high", "fp8")
 
 
 class PrecisionAPIPlugin:
@@ -40,11 +41,13 @@ class PrecisionAPIPlugin:
                 body = await raw_request.json()
             except Exception as e:  # noqa: BLE001
                 raise HTTPException(status_code=400, detail=f"invalid JSON: {e}") from e
-            mode = str((body or {}).get("mode", "")).strip().lower()
-            mode = {"bf16": "high", "fp16": "high", "16": "high"}.get(mode, mode)
-            if mode not in MODES:
-                raise HTTPException(status_code=400, detail=f"mode must be one of {MODES}")
-            results = await client.collective_rpc("vpa_set_mode", args=(mode,))
+            body = body or {}
+            version = str(body.get("version", body.get("mode", ""))).strip()
+            if not version:
+                raise HTTPException(status_code=400, detail='body must be {"version": "<name>"}')
+            results = await client.collective_rpc("vpa_set_mode", args=(version,))
+            if results and isinstance(results[0], dict) and results[0].get("error"):
+                raise HTTPException(status_code=400, detail=results[0]["error"])
             return _summary(results)
 
     async def init_state(self, engine_client, state, args) -> None:
@@ -69,7 +72,9 @@ def _summary(results) -> dict:
     swap = first.get("swap") or {}
     return {
         "format": first.get("format"),
-        "mode": swap.get("target", first.get("mode")),
+        "version": swap.get("target", first.get("mode")),
+        "mode": swap.get("target", first.get("mode")),  # alias (v0.3 clients)
+        "versions": swap.get("versions", []),
         "fp8_layers": swap.get("fp8_layers"),
         "layers": swap.get("layers", first.get("layers")),
         "migrating": swap.get("migrating", False),

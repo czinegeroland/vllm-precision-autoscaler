@@ -136,38 +136,35 @@ def nested_linear(x, a_fp8, b, off, scale, bias, layer_id: int) -> torch.Tensor:
     return torch.ops.precision_autoscaler.nested_linear(x, a_fp8, b, off, scale, bias, layer_id)
 
 
-# --- swap format: one precision resident, migrated in the background ----------
+# --- swap format: one version resident, all versions in pinned RAM -------------
 
 def _swap_linear_impl(
     x: torch.Tensor,
     region: torch.Tensor,
-    scale: torch.Tensor,
     bias: Optional[torch.Tensor],
     layer_id: int,
     n: int,
     k: int,
 ) -> torch.Tensor:
+    from .versions import KINDS
+
     num_tokens = x.numel() // x.shape[-1]
     mgr = state.swap_manager
     if not state.graphs_enabled and layer_id == mgr.first_id:
         mgr.on_step(num_tokens)  # once per engine step, before any layer runs
-    # While vLLM records the graph set for one precision, use that precision
-    # (the memory may still hold the other one: recorded outputs are discarded).
-    mode = state.capture_precision or mgr.layers[layer_id].mode
-    fp8 = mode == "fp8"
+    layer = mgr.layers[layer_id]
+    # While vLLM records the graph set for one version, run that version's
+    # kernels (the region may still hold another one: recorded outputs are
+    # discarded).
+    version = state.capture_precision or layer.active
     if state.counters is not None:
-        state.record(layer_id, fp8, num_tokens)
-    if fp8:
-        w = region[: n * k].view(torch.float8_e4m3fn).view(n, k)
-        return _fp8_gemm(x, w.t(), scale, bias, n)
-    w = region.view(x.dtype).view(n, k)
-    return torch.nn.functional.linear(x, w, bias)
+        state.record(layer_id, version != "high", num_tokens)
+    return KINDS[version].apply(x, region, layer.versions[version].aux, bias, n, k)
 
 
 def _swap_linear_fake(
     x: torch.Tensor,
     region: torch.Tensor,
-    scale: torch.Tensor,
     bias: Optional[torch.Tensor],
     layer_id: int,
     n: int,
@@ -185,5 +182,5 @@ direct_register_custom_op(
 )
 
 
-def swap_linear(x, region, scale, bias, layer_id: int, n: int, k: int) -> torch.Tensor:
-    return torch.ops.precision_autoscaler.swap_linear(x, region, scale, bias, layer_id, n, k)
+def swap_linear(x, region, bias, layer_id: int, n: int, k: int) -> torch.Tensor:
+    return torch.ops.precision_autoscaler.swap_linear(x, region, bias, layer_id, n, k)

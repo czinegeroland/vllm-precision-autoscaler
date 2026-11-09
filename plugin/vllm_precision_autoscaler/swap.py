@@ -1,23 +1,23 @@
-"""Swap format: one precision in VRAM, both in pinned CPU RAM.
+"""Swap format: one precision version in VRAM, all versions in pinned CPU RAM.
 
-Each linear layer owns a GPU "region" the size of its BF16 weight. The region
-holds either the BF16 weight or (in its first half) the FP8 weight. Both
-versions live in pinned CPU memory. When the target precision changes, layers
-migrate one by one *while the model keeps serving*:
+Each linear layer owns a GPU "region" the size of its largest version. The
+region holds the bytes of the *active* version; every configured version
+(versions.py: 16-bit, FP8, ...) lives in pinned CPU memory in its kernel's
+format. When the target version changes, layers migrate *while the model keeps
+serving*:
 
-  1. side CUDA stream: copy the layer's new weights CPU -> staging buffer
-     (async over PCIe, overlaps with the model's kernels)
-  2. at the start of a later engine step, once that copy has finished:
-     staging -> region (fast GPU-to-GPU copy, on the main stream) and flip
-     that layer's precision.
+  1. side CUDA stream: copy layers' new bytes CPU -> staging buffer (several
+     whole layers packed per buffer; async over PCIe, overlaps with compute)
+  2. at the start of a later engine step, once a copy has finished:
+     staging -> region (fast GPU-to-GPU copy, main stream) and flip those
+     layers to the new version.
 
-Because step 2 runs on the main stream before any layer of that step uses its
-weights, every step sees a consistent set of weights; during a migration some
-layers are FP8 and some are 16-bit. Staging is a few layer-sized buffers, not
-a second model copy.
+Step 2 runs on the main stream before any layer of that step uses its weights,
+so every step sees consistent weights; during a migration some layers run one
+version and some another. With no traffic, pump() (called from the HTTP API)
+finishes the migration in one go.
 
-Requires CUDA graphs off: a recorded graph would keep calling the kernel it was
-recorded with, on bytes that now hold the other format.
+CUDA graphs: either off, or one recorded graph set per version (graphs.py).
 """
 
 from __future__ import annotations
@@ -29,6 +29,7 @@ from typing import Any
 import torch
 
 from .swap_policy import HysteresisPolicy
+from .versions import KINDS, LayerVersion, canonical
 
 # pump() treats the engine as idle when no step ran for this long, and then
 # finishes a pending migration in one go instead of one batch per call.
@@ -40,14 +41,22 @@ class SwapLayer:
     layer_id: int
     n: int
     k: int
-    region: torch.Tensor        # GPU uint8 [2*n*k]
-    scale: torch.Tensor         # GPU fp32 [n, 1] (FP8 per-channel scales, always resident)
-    cpu_high: torch.Tensor      # pinned uint8 [2*n*k] (BF16/FP16 bytes)
-    cpu_fp8: torch.Tensor       # pinned uint8 [n*k]
-    mode: str = "high"
+    region: torch.Tensor                  # GPU uint8, sized for the largest version
+    versions: dict[str, LayerVersion]
+    active: str = "high"
 
-    def nbytes(self, mode: str) -> int:
-        return self.n * self.k * (2 if mode == "high" else 1)
+    def nbytes(self, version: str) -> int:
+        return self.versions[version].nbytes
+
+
+def build_swap_layer(layer_id: int, weight: torch.Tensor, region: torch.Tensor,
+                     version_names: tuple[str, ...], active: str = "high") -> SwapLayer:
+    """Build every configured version of one layer from its 16-bit weight."""
+    n, k = weight.shape
+    versions = {name: KINDS[name].build(weight) for name in version_names}
+    biggest = max(v.nbytes for v in versions.values())
+    assert region.numel() >= biggest, (region.numel(), biggest)
+    return SwapLayer(layer_id, n, k, region, versions, active)
 
 
 @dataclass
@@ -67,7 +76,7 @@ class _Transfer:
     back to back (layer_id, offset in the staging buffer, bytes)."""
     slot: int
     items: list[tuple[int, int, int]]
-    mode: str
+    version: str
     done: torch.cuda.Event
 
 
@@ -75,18 +84,22 @@ class SwapManager:
     def __init__(self, settings: Any, logger: Any) -> None:
         self.settings = settings
         self.logger = logger
+        self.version_names: tuple[str, ...] = tuple(getattr(settings, "swap_versions", ("high", "fp8")))
         self.layers: dict[int, SwapLayer] = {}
         self.order: list[int] = []
-        self.target = "fp8" if settings.mode == "fp8" else "high"
+        start = canonical(settings.mode)
+        self.target = start if start in self.version_names else "high"
         # Deciding *when* to switch is an external controller's job by default
         # (POST /v1/precision). The built-in policy is an explicit opt-in.
         self.policy = (
             HysteresisPolicy(settings.swap_up, settings.swap_down, settings.swap_dwell_s,
-                             settings.swap_ema_s, start=self.target)
-            if settings.mode == "auto" and settings.swap_policy == "hysteresis" else None
+                             settings.swap_ema_s, start="high")
+            if settings.mode == "auto" and settings.swap_policy == "hysteresis"
+            and "fp8" in self.version_names else None
         )
         self.staging: list[torch.Tensor] = []
         self.slot_free: list[torch.cuda.Event | None] = []
+        self.slot_bytes = 0
         self.inflight: list[_Transfer] = []
         self.side: torch.cuda.Stream | None = None
         self.first_id: int | None = None
@@ -107,7 +120,7 @@ class SwapManager:
         sizes the KV cache)."""
         if self.staging:
             return
-        biggest = max(l.nbytes("high") for l in self.layers.values())
+        biggest = max(max(v.nbytes for v in l.versions.values()) for l in self.layers.values())
         n_slots = self.settings.swap_slots
         budget = getattr(self.settings, "swap_staging_mib", 0)
         if budget:
@@ -119,28 +132,35 @@ class SwapManager:
             self.staging.append(torch.empty(biggest, dtype=torch.uint8, device=device))
             self.slot_free.append(None)
         self.side = torch.cuda.Stream(device=device)
-        pinned = sum(l.cpu_high.numel() + l.cpu_fp8.numel() for l in self.layers.values())
         self.logger.info(
-            "precision_autoscaler swap: %d layers, pinned CPU copies %.2f GiB, "
+            "precision_autoscaler swap: %d layers, versions %s, pinned CPU copies %.2f GiB, "
             "staging %d x %.0f MiB, start=%s, policy=%s",
-            len(self.layers), pinned / 2**30, len(self.staging), biggest / 2**20, self.target,
+            len(self.layers), ",".join(self.version_names), self.pinned_bytes() / 2**30,
+            len(self.staging), biggest / 2**20, self.target,
             "hysteresis" if self.policy else "manual",
         )
-        if self.target == "fp8":  # start in FP8: migrate before serving
-            self.set_target("fp8")
+        if self.target != "high":  # start in another version: migrate before serving
+            target, self.target = self.target, "high"
+            self.set_target(target)
+
+    def pinned_bytes(self, version: str | None = None) -> int:
+        return sum(v.cpu.numel() for l in self.layers.values() for name, v in l.versions.items()
+                   if version is None or name == version)
 
     # -- control -------------------------------------------------------------
-    def set_target(self, mode: str) -> None:
-        mode = "fp8" if mode == "fp8" else "high"
-        if mode != self.target or self._pending():
-            self.target = mode
-            if self.current is None or self.current.target != mode:
-                self.current = Migration(target=mode, started=time.monotonic())
-                self.logger.info("precision_autoscaler swap: migrating to %s", mode)
+    def set_target(self, version: str) -> None:
+        version = canonical(version)
+        if version not in self.version_names:
+            raise ValueError(f"unknown version {version!r}; available: {list(self.version_names)}")
+        if version != self.target or self._pending():
+            self.target = version
+            if self.current is None or self.current.target != version:
+                self.current = Migration(target=version, started=time.monotonic())
+                self.logger.info("precision_autoscaler swap: migrating to %s", version)
 
     def _pending(self) -> list[int]:
         busy = {lid for t in self.inflight for lid, _, _ in t.items}
-        return [i for i in self.order if self.layers[i].mode != self.target and i not in busy]
+        return [i for i in self.order if self.layers[i].active != self.target and i not in busy]
 
     def _maybe_finish(self) -> None:
         if self.current is not None and not self.inflight and not self._pending():
@@ -154,7 +174,7 @@ class SwapManager:
                 m.target, m.layers, m.bytes / 2**30, m.finished - m.started, m.steps, m.transfers,
             )
 
-    # -- called once per engine step (from the first swap layer's op) ---------
+    # -- called once per engine step ------------------------------------------
     def on_step(self, num_tokens: int) -> None:
         self.steps += 1
         self.last_step_t = time.monotonic()
@@ -204,8 +224,8 @@ class SwapManager:
             for layer_id, off, nb in t.items:
                 layer = self.layers[layer_id]
                 layer.region[:nb].copy_(self.staging[t.slot][off : off + nb], non_blocking=True)
-                layer.mode = t.mode
-                if self.current is not None and self.current.target == t.mode:
+                layer.active = t.version
+                if self.current is not None and self.current.target == t.version:
                     self.current.layers += 1
                     self.current.bytes += nb
             free = torch.cuda.Event()
@@ -239,8 +259,7 @@ class SwapManager:
                 if self.slot_free[slot] is not None:
                     self.side.wait_event(self.slot_free[slot])
                 for lid, o, nb in items:
-                    layer = self.layers[lid]
-                    src = layer.cpu_high if self.target == "high" else layer.cpu_fp8
+                    src = self.layers[lid].versions[self.target].cpu
                     self.staging[slot][o : o + nb].copy_(src, non_blocking=True)
                 done = torch.cuda.Event()
                 done.record(self.side)
@@ -250,14 +269,22 @@ class SwapManager:
 
     # -- telemetry -----------------------------------------------------------
     def stats(self) -> dict:
-        fp8 = sum(1 for l in self.layers.values() if l.mode == "fp8")
+        by_version = {name: 0 for name in self.version_names}
+        for l in self.layers.values():
+            by_version[l.active] = by_version.get(l.active, 0) + 1
         recent = self.migrations[-10:]
         return {
             "target": self.target,
-            "staging": {"buffers": len(self.staging), "mib_each": round(getattr(self, "slot_bytes", 0) / 2**20)},
+            "versions": [
+                {"name": name, "bits": KINDS[name].bits, "method": KINDS[name].method,
+                 "ram_gib": round(self.pinned_bytes(name) / 2**30, 3),
+                 "active_layers": by_version.get(name, 0)}
+                for name in self.version_names
+            ],
+            "staging": {"buffers": len(self.staging), "mib_each": round(self.slot_bytes / 2**20)},
             "policy": "hysteresis" if self.policy else "external",
             "layers": len(self.layers),
-            "fp8_layers": fp8,
+            "fp8_layers": by_version.get("fp8", 0),
             "migrating": self.current is not None,
             "ema_tokens_per_step": self.policy.ema if self.policy else None,
             "steps": self.steps,

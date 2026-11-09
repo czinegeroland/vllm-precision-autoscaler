@@ -167,5 +167,23 @@ class SwapSettingsTests(unittest.TestCase):
             Settings.from_env({"VPA_FORMAT": "int4"})
 
 
+versions_names = _load("versions_names")
+
+
+class VersionNameTests(unittest.TestCase):
+    def test_default_versions(self):
+        self.assertEqual(Settings.from_env({}).swap_versions, ("high", "fp8"))
+
+    def test_aliases_order_and_dedup(self):
+        self.assertEqual(versions_names.parse_versions("fp8, BF16, fp8"), ("fp8", "high"))
+
+    def test_high_always_included(self):
+        self.assertEqual(versions_names.parse_versions("fp8"), ("high", "fp8"))
+
+    def test_unknown_version(self):
+        with self.assertRaises(ValueError):
+            Settings.from_env({"VPA_VERSIONS": "high,int3"})
+
+
 if __name__ == "__main__":
     unittest.main()

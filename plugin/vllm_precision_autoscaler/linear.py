@@ -60,22 +60,16 @@ class PrecisionAutoscalerLinearMethod(UnquantizedLinearMethod):
         state.ensure_counters(weight.device)
 
     def _process_swap(self, layer: torch.nn.Module, weight: torch.Tensor) -> None:
-        from .swap import SwapLayer
+        from .swap import build_swap_layer
 
         n, k = weight.shape
-        q, scale = quantize_weight_per_channel(weight)
-        cpu_high = torch.empty(2 * n * k, dtype=torch.uint8, pin_memory=True)
-        cpu_high.copy_(weight.contiguous().view(torch.uint8).reshape(-1))
-        cpu_fp8 = torch.empty(n * k, dtype=torch.uint8, pin_memory=True)
-        cpu_fp8.copy_(q.view(torch.uint8).reshape(-1))
-        del q
-        # The GPU region *is* the loaded weight's memory: no extra VRAM.
+        # The GPU region *is* the loaded 16-bit weight's memory: no extra VRAM
+        # (every version is at most as large as the 16-bit one).
         region = weight.view(torch.uint8).reshape(-1)
         self.swap_n, self.swap_k = n, k
         layer.register_buffer("vpa_region", region, persistent=False)
-        layer.register_buffer("vpa_scale", scale, persistent=False)
         mgr = state.get_swap_manager()
-        mgr.register(SwapLayer(self.layer_id, n, k, region, scale, cpu_high, cpu_fp8))
+        mgr.register(build_swap_layer(self.layer_id, weight, region, mgr.version_names))
         if len(mgr.layers) == sum(state.eligible):
             mgr.finalize(weight.device)
 
@@ -108,8 +102,7 @@ class PrecisionAutoscalerLinearMethod(UnquantizedLinearMethod):
             return super().apply(layer, x, bias)
         if self.format == "swap":
             return ops.swap_linear(
-                x, layer.vpa_region, layer.vpa_scale, bias, self.layer_id,
-                self.swap_n, self.swap_k,
+                x, layer.vpa_region, bias, self.layer_id, self.swap_n, self.swap_k,
             )
         if self.format == "nested":
             return ops.nested_linear(

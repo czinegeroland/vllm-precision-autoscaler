@@ -81,12 +81,12 @@ allowlisted, and the allowlist then applies to all plugins, so both names are li
 
 | Request | Effect |
 |---|---|
-| `GET /v1/precision` | current state: `mode`, `fp8_layers`/`layers`, `migrating`, recent `migrations` (also advances a pending migration while the engine is idle) |
-| `POST /v1/precision` `{"mode": "fp8"}` | start switching to FP8 (`"high"` = back to BF16); returns immediately, layers migrate in the background while serving |
+| `GET /v1/precision` | active `version`, all configured `versions` (bits, method, RAM used), `migrating`, recent `migrations` (also finishes a pending migration while the engine is idle) |
+| `POST /v1/precision` `{"version": "fp8"}` | start switching to that version (`"high"`/`"bf16"` = back to 16-bit; `"mode"` accepted as an alias); 400 if the version isn't configured; layers migrate in the background while serving |
 
 ```bash
 curl -s localhost:8000/v1/precision
-curl -s localhost:8000/v1/precision -H 'Content-Type: application/json' -d '{"mode":"fp8"}'
+curl -s localhost:8000/v1/precision -H 'Content-Type: application/json' -d '{"version":"fp8"}'
 ```
 
 ### Reference controller
@@ -111,6 +111,7 @@ migration took ~5 s; external control is the default.
 |---|---|---|
 | `VPA_FORMAT` | `dual` | `swap`, `dual` or `nested` |
 | `VPA_MODE` | `auto` | starting precision: `high` (16-bit) or `fp8`; `auto`/`dial` for `dual` (and for `swap` only with `VPA_SWAP_POLICY=hysteresis`) |
+| `VPA_VERSIONS` | `high,fp8` | swap: precision versions built at startup and kept in pinned RAM (`high` always included) |
 | `VPA_SWAP_POLICY` | `external` | swap: `external` (switch only via the API) or `hysteresis` (built-in, opt-in) |
 | `VPA_SWAP_UP` / `VPA_SWAP_DOWN` | 64 / 32 | built-in policy only: tokens per step (smoothed) to go to FP8 / back |
 | `VPA_SWAP_DWELL_S` | 5 | swap+auto: minimum seconds between precision changes |

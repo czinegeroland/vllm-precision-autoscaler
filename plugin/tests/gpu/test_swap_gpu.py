@@ -11,7 +11,7 @@ pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUD
 from vllm_precision_autoscaler import ops, state  # noqa: E402
 from vllm_precision_autoscaler.fp8_weights import quantize_weight_per_channel  # noqa: E402
 from vllm_precision_autoscaler.settings import Settings  # noqa: E402
-from vllm_precision_autoscaler.swap import SwapLayer, SwapManager  # noqa: E402
+from vllm_precision_autoscaler.swap import SwapManager, build_swap_layer  # noqa: E402
 
 
 class _Log:
@@ -31,13 +31,9 @@ def setup():
     for n, k in SHAPES:
         w = (torch.randn(n, k, device="cuda") * 0.02).to(torch.bfloat16)
         q, scale = quantize_weight_per_channel(w)
-        cpu_high = torch.empty(2 * n * k, dtype=torch.uint8, pin_memory=True)
-        cpu_high.copy_(w.view(torch.uint8).reshape(-1))
-        cpu_fp8 = torch.empty(n * k, dtype=torch.uint8, pin_memory=True)
-        cpu_fp8.copy_(q.view(torch.uint8).reshape(-1))
         region = w.clone().view(torch.uint8).reshape(-1)
         lid = state.register_layer(f"model.layers.0.mlp.swap_test_{len(state.prefixes)}")
-        mgr.register(SwapLayer(lid, n, k, region, scale, cpu_high, cpu_fp8))
+        mgr.register(build_swap_layer(lid, w, region, ("high", "fp8")))
         weights.append((w, q, scale))
         layers.append(lid)
     mgr.finalize(torch.device("cuda"))
@@ -51,7 +47,7 @@ def forward(mgr, layers, xs):
     outs = []
     for lid, x in zip(layers, xs):
         layer = mgr.layers[lid]
-        outs.append(ops.swap_linear(x, layer.region, layer.scale, None, lid, layer.n, layer.k))
+        outs.append(ops.swap_linear(x, layer.region, None, lid, layer.n, layer.k))
     return outs
 
 
@@ -82,7 +78,7 @@ def test_roundtrip_bf16_fp8_bf16(setup):
 
     mgr.set_target("fp8")
     steps = run_until_settled(mgr, layers, xs)
-    assert all(mgr.layers[l].mode == "fp8" for l in layers)
+    assert all(mgr.layers[l].active == "fp8" for l in layers)
     out = forward(mgr, layers, xs)
     for o, x, (w, q, s) in zip(out, xs, weights):
         torch.testing.assert_close(o, fp8_ref(x, q, s), rtol=0, atol=0)  # exactly the FP8 path
@@ -109,7 +105,7 @@ def test_every_step_is_consistent_during_migration(setup):
     mgr.set_target("high")
     seen_mixed = False
     for _ in range(200):
-        modes = [mgr.layers[l].mode for l in layers]
+        modes = [mgr.layers[l].active for l in layers]
         out = forward(mgr, layers, xs)
         torch.cuda.synchronize()
         for o, x, (w, q, s), lid in zip(out, xs, weights, layers):
@@ -120,7 +116,7 @@ def test_every_step_is_consistent_during_migration(setup):
             seen_mixed = True
         if mgr.current is None and not mgr.inflight:
             break
-    assert all(mgr.layers[l].mode == "high" for l in layers)
+    assert all(mgr.layers[l].active == "high" for l in layers)
     assert seen_mixed, "expected at least one step with mixed precisions"
 
 
@@ -150,3 +146,10 @@ def test_pcie_bandwidth_report(setup):
     gbs = 5 * src.numel() / (start.elapsed_time(end) / 1000) / 1e9
     print(f"\nPINNED_H2D_GBPS={gbs:.1f}")
     assert gbs > 1
+
+
+def test_unknown_version_is_rejected(setup):
+    mgr, _, _ = setup
+    with pytest.raises(ValueError):
+        mgr.set_target("int3")
+    assert mgr.target == "high" and mgr.current is None

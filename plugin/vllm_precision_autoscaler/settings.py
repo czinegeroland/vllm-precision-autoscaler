@@ -26,6 +26,9 @@ engine-core and worker processes that vLLM spawns.
                                target changes (needs CUDA graphs off).
                                VPA_MODE: high | fp8 = fixed start, switch via
                                RPC; auto = hysteresis policy below
+    VPA_VERSIONS      swap: precision versions to build and keep in pinned RAM,
+                      comma-separated (default: high,fp8). 'high' = the loaded
+                      16-bit weights, always included. See versions.py.
     VPA_SWAP_POLICY   swap: external (default) | hysteresis
                       external   = the plugin only switches when told to, via
                                    POST /v1/precision (api.py) or vpa_set_mode;
@@ -88,6 +91,12 @@ def _float(env: Mapping[str, str], key: str, default: float) -> float:
     return value
 
 
+def _versions(raw: str) -> tuple:
+    from .versions_names import parse_versions
+
+    return parse_versions(raw)
+
+
 def _flag(env: Mapping[str, str], key: str) -> bool:
     return env.get(key, "0").strip().lower() in ("1", "true", "yes", "on")
 
@@ -108,6 +117,7 @@ class Settings:
     swap_slots: int = 4
     swap_staging_mib: int = 0
     swap_pack: bool = True
+    swap_versions: tuple = ("high", "fp8")
     swap_graphs: bool = True
     swap_policy: str = "external"
 
@@ -141,6 +151,7 @@ class Settings:
             swap_pack=env.get("VPA_SWAP_PACK", "1").strip().lower() not in ("0", "false", "no", "off"),
             swap_graphs=env.get("VPA_SWAP_GRAPHS", "1").strip().lower() not in ("0", "false", "no", "off"),
             swap_policy=env.get("VPA_SWAP_POLICY", "external").strip().lower(),
+            swap_versions=_versions(env.get("VPA_VERSIONS", "high,fp8")),
         )
 
     def with_mode(self, mode: str, threshold: int | None = None) -> "Settings":
