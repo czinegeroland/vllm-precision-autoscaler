@@ -226,7 +226,7 @@ the API to help the controller.
 | 1 | ~~Faster migrations~~ **done** (FINDINGS §13): packed staging + idle drain; 4B: 0.31 s / 0.77 s loaded, 0.28 s / 0.55 s idle | H100 confirmation pending | 4090, $0.32 |
 | 2 | ~~Generalize into versions~~ **done** (v0.4.0, FINDINGS §14): `versions.py` kinds, `VPA_VERSIONS`, API lists versions; behaviour identical to v0.3.2 | — | 4090, $0.27 |
 | 3 | Config file + RAM budget + `prepare`/`evict` | BF16 + FP8 + INT8 (online) from config | 4090 |
-| 4 | INT4 from an AWQ checkpoint (Marlin) | INT4 activates while serving; batch-size sweep BF16/FP8/INT4 | 4090 (Qwen3-4B-AWQ) |
+| 4 | ~~INT4 (Marlin)~~ **done** (v0.5.0, FINDINGS §15): built online with RTN g128 instead of an AWQ checkpoint; INT4 2.2× at 1 user, FP8 overtakes it between 64 and 128 users | quality (GSM8K) pending; AWQ checkpoint optional | 4090, $0.52 |
 | 5 | Disk tier (loading-optimized files, threaded reads) | disk → RAM → VRAM activation measured | 4090 |
 | 6 | Telemetry (Prometheus) + controller update | controller plans with `est_activate_s` | — |
 | 7 | H100 + Qwen3-32B end-to-end, quality per version (GSM8K) | article data | H100, ~$3–5 |

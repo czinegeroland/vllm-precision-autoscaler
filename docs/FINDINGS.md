@@ -1042,3 +1042,65 @@ which interrupted the live log trail but not the run.
 **Next (design phase 3–4):** a third version kind, INT4 weight-only (Marlin), and
 the config file. Adding a kind is now one class in `versions.py` plus its name in
 `versions_names.py`.
+
+## 15. Third version: INT4 weight-only (v0.5.0, run 9, 2026-11-09)
+
+Pod `gheu2vvnab01jx`, RunPod Secure RTX 4090, $0.89/h, ~35 min (incl. two failed
+attempts) ≈ **$0.52**; total spend ≈ **$6.90**. Qwen3-4B. Script: `bench/int4_check.sh`;
+files: `results/int4/` (+ `results/int4_try1`, `int4_try2` from the failed attempts).
+
+**What was added:** one version kind, `Int4Kind` in `versions.py` (`VPA_VERSIONS=high,fp8,int4`):
+W4A16, round-to-nearest, symmetric, group size 128, built online from the 16-bit
+weights at load time (no calibration, no separate checkpoint), repacked for vLLM's
+**Marlin** kernel (`gptq_marlin_repack`, `apply_gptq_marlin_linear`). Stored in pinned
+RAM like the other versions; in VRAM it occupies the front quarter of the 16-bit region.
+
+**Bugs found on the way (both fixed before the numbers below):**
+
+| Attempt | Problem | Fix |
+|---|---|---|
+| 1 | Layers with bias gave wrong outputs: Marlin permutes output columns, the bias must be permuted the same way | `marlin_permute_bias`, cached per layer |
+| 2 | Engine crash: "Workspace is locked but marlin_locks ... not allocated during warmup" (vLLM's shared workspace manager is locked after warmup, but INT4 graphs are captured later) | plugin owns its Marlin workspace, allocated when the version is built |
+
+**Verification:**
+
+| Check | Result |
+|---|---|
+| GPU tests (INT4 vs dequantized reference < 1e-2; bias; 3-version round trip) | **31 / 31 pass** |
+| Graph sets | `high: 35`, `fp8: 35`, `int4: 35` |
+| Decode speed, 1 request | 16-bit **101.6**, FP8 **130.6**, INT4 **226.1** tok/s |
+| Round trip high → fp8 → int4 → high | **16 / 16 outputs identical** to the first 16-bit run |
+| Migrations (under filler load) | → FP8 0.455 s (3.38 GiB, 40 transfers), → INT4 **0.252 s** (1.69 GiB, 19), → 16-bit 0.905 s (6.77 GiB, 80) |
+| KV cache | 91,696 tokens in all three versions (region sized for 16-bit) |
+
+**Load sweep** (`bench/run_bench.sh`, configs `swap-high`, `swap-fp8`, `swap-int4`, each pinned
+to one version, CUDA graphs FULL_DECODE_ONLY):
+
+| Users | 16-bit tok/s | FP8 tok/s | INT4 tok/s | 16-bit TPOT | FP8 TPOT | INT4 TPOT | P95 TTFT 16/8/4 (ms) |
+|---|---|---|---|---|---|---|---|
+| 1 | 100.8 | 127.5 (+26%) | **222.5 (+121%)** | 9.76 | 7.63 | **4.30** | 62 / 67 / 57 |
+| 8 | 677.8 | 862.8 (+27%) | **1357.1 (+100%)** | 11.24 | 8.70 | **5.25** | 249 / 217 / 252 |
+| 32 | 1959.6 | 2318.5 (+18%) | **2948.8 (+50%)** | 15.28 | 12.87 | **9.52** | 515 / 454 / 666 |
+| 64 | 2622.9 | 3043.0 (+16%) | **3139.7 (+20%)** | 22.53 | 19.28 | **18.31** | 1205 / 965 / 1209 |
+| 128 | 2939.8 | **3305.4 (+12%)** | 3105.8 (+6%) | 39.20 | **35.30** | 37.55 | 2409 / **1895** / 2395 |
+
+**Reading it:**
+
+- **INT4 wins big at low and medium load** (2.2× at 1 user, 2.0× at 8, 1.5× at 32):
+  decode is memory-bound and INT4 reads a quarter of the bytes.
+- **FP8 overtakes INT4 between 64 and 128 users.** Marlin W4A16 still does its math in
+  16-bit and has to dequantize; FP8 W8A8 uses the FP8 tensor cores. Once the batch is
+  big enough to be compute-bound, that matters more than the weight bytes. This
+  matches the literature (W4A16 for latency, W8A8 for throughput, see the DESIGN doc).
+  INT4 also has the worst P95 TTFT at 32 users (prefill is compute-bound too).
+- So the precision ladder is **not monotonic in load**: a controller picking "lowest
+  precision = fastest" would be wrong at high load. The useful policy on this GPU/model
+  is roughly *INT4 up to ~64 concurrent users, FP8 beyond*, with 16-bit kept for when
+  quality matters most. This is exactly why the decision lives in an external
+  controller: the crossover depends on GPU, model and traffic shape.
+- **Quality is not measured yet.** This INT4 is plain RTN (no AWQ/GPTQ calibration);
+  outputs differ from 16-bit (expected). GSM8K per version is still to do before any
+  quality claim in the article.
+
+**Next:** quality per version (GSM8K incl. INT4), config file (`VPA_CONFIG`),
+H100 + Qwen3-32B confirmation, C# controller + Prometheus telemetry.
