@@ -7,8 +7,9 @@ from __future__ import annotations
 KNOWN = {
     "high": (16, "unquantized"),
     "fp8": (8, "fp8_per_channel_w8a8"),
+    "int4": (4, "int4_w4a16_rtn_g128_marlin"),
 }
-ALIASES = {"bf16": "high", "fp16": "high", "16": "high", "8": "fp8"}
+ALIASES = {"bf16": "high", "fp16": "high", "16": "high", "8": "fp8", "4": "int4", "w4a16": "int4"}
 
 
 def canonical(name: str) -> str:

@@ -20,10 +20,12 @@ def main() -> None:
     ap.add_argument("--model", default="Qwen/Qwen3-4B")
     ap.add_argument("--out", required=True)
     ap.add_argument("--cudagraph-mode", default="FULL_DECODE_ONLY", help="FULL_DECODE_ONLY or NONE")
+    ap.add_argument("--versions", default="high,fp8")
     args = ap.parse_args()
     os.environ["VLLM_DISABLE_COMPILE_CACHE"] = "1"
 
     os.environ["VPA_FORMAT"] = "swap"
+    os.environ["VPA_VERSIONS"] = args.versions
     os.environ["VPA_MODE"] = "high"
     os.environ["VPA_COUNT"] = "1"
 
@@ -62,35 +64,39 @@ def main() -> None:
             llm.generate(prompts[:2], filler, use_tqdm=False)
             steps += 1
             s = stats()["swap"]
-            if not s["migrating"] and (s["fp8_layers"] == (s["layers"] if mode == "fp8" else 0)):
+            active = {v["name"]: v["active_layers"] for v in s["versions"]}
+            if not s["migrating"] and active.get(mode) == s["layers"]:
                 return {"wall_s": time.time() - t, "filler_batches": steps, "swap": s}
             if time.time() - t > 120:
                 raise RuntimeError(f"migration to {mode} did not finish: {s}")
 
+    names = [v["name"] for v in stats()["swap"]["versions"]]
     result = {"model": args.model, "cudagraph_mode": args.cudagraph_mode, "load_s": load_s,
-              "initial": stats()}
+              "versions": names, "initial": stats(), "decode_tok_s": {}, "migrations": {}}
     a = gen()
-    result["decode_tok_s_high"] = decode_speed()
-    result["to_fp8"] = migrate("fp8")
-    b = gen()
-    result["decode_tok_s_fp8"] = decode_speed()
-    result["to_high"] = migrate("high")
-    c = gen()
+    result["decode_tok_s"]["high"] = decode_speed()
+    outputs = {"high": a}
+    for v in [x for x in names if x != "high"] + ["high"]:
+        result["migrations"][f"to_{v}"] = migrate(v)["swap"]["migrations"][-1]
+        outputs[v if v not in outputs else "high_again"] = gen()
+        if v != "high":
+            result["decode_tok_s"][v] = decode_speed()
+    c = outputs["high_again"]
     result["checks"] = {
-        "fp8_differs_from_high": a != b,
+        "other_versions_differ_from_high": all(outputs[v] != a for v in names if v != "high"),
         "high_restored_exactly": a == c,
         "samples_identical_after_roundtrip": sum(x == y for x, y in zip(a, c)),
     }
     result["final"] = stats()
     with open(args.out, "w") as f:
         json.dump(result, f, indent=2)
-    print(json.dumps({"load_s": load_s, "cudagraph_mode": args.cudagraph_mode,
+    print(json.dumps({"load_s": round(load_s, 1), "cudagraph_mode": args.cudagraph_mode,
                       "graph_sets": result["final"].get("cuda_graph_sets"),
-                      "decode_tok_s": [round(result["decode_tok_s_high"], 1),
-                                       round(result["decode_tok_s_fp8"], 1)],
+                      "decode_tok_s": {k: round(v, 1) for k, v in result["decode_tok_s"].items()},
                       "checks": result["checks"],
-                      "to_fp8": result["to_fp8"]["swap"]["migrations"][-1],
-                      "to_high": result["to_high"]["swap"]["migrations"][-1]}))
+                      "migrations": {k: {"s": round(m["seconds"], 3), "gib": round(m["gib"], 2),
+                                         "transfers": m["transfers"]}
+                                     for k, m in result["migrations"].items()}}))
 
 
 if __name__ == "__main__":

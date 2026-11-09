@@ -180,6 +180,18 @@ class VersionNameTests(unittest.TestCase):
     def test_high_always_included(self):
         self.assertEqual(versions_names.parse_versions("fp8"), ("high", "fp8"))
 
+    def test_int4_version_and_start_mode(self):
+        s = Settings.from_env({"VPA_FORMAT": "swap", "VPA_VERSIONS": "high,fp8,int4", "VPA_MODE": "int4"})
+        self.assertEqual((s.swap_versions, s.mode), (("high", "fp8", "int4"), "int4"))
+
+    def test_start_mode_must_be_built(self):
+        with self.assertRaises(ValueError):
+            Settings.from_env({"VPA_FORMAT": "swap", "VPA_MODE": "int4"})  # default versions: high,fp8
+
+    def test_version_mode_needs_swap_format(self):
+        with self.assertRaises(ValueError):
+            Settings.from_env({"VPA_MODE": "int4", "VPA_VERSIONS": "high,int4"})
+
     def test_unknown_version(self):
         with self.assertRaises(ValueError):
             Settings.from_env({"VPA_VERSIONS": "high,int3"})

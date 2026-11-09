@@ -111,7 +111,7 @@ migration took ~5 s; external control is the default.
 |---|---|---|
 | `VPA_FORMAT` | `dual` | `swap`, `dual` or `nested` |
 | `VPA_MODE` | `auto` | starting precision: `high` (16-bit) or `fp8`; `auto`/`dial` for `dual` (and for `swap` only with `VPA_SWAP_POLICY=hysteresis`) |
-| `VPA_VERSIONS` | `high,fp8` | swap: precision versions built at startup and kept in pinned RAM (`high` always included) |
+| `VPA_VERSIONS` | `high,fp8` | swap: precision versions built at startup and kept in pinned RAM: `high` (16-bit, always included), `fp8` (W8A8), `int4` (W4A16 Marlin, RTN g128) |
 | `VPA_SWAP_POLICY` | `external` | swap: `external` (switch only via the API) or `hysteresis` (built-in, opt-in) |
 | `VPA_SWAP_UP` / `VPA_SWAP_DOWN` | 64 / 32 | built-in policy only: tokens per step (smoothed) to go to FP8 / back |
 | `VPA_SWAP_DWELL_S` | 5 | swap+auto: minimum seconds between precision changes |

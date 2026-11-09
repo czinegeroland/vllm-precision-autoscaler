@@ -64,11 +64,17 @@ _ALIASES = {"bf16": "high", "fp16": "high", "16": "high", "8": "fp8"}
 
 
 def normalize_mode(raw: str) -> str:
+    """high | fp8 | auto | dial, or (swap format) any precision version name."""
+    from .versions_names import KNOWN, canonical
+
     mode = raw.strip().lower()
     mode = _ALIASES.get(mode, mode)
-    if mode not in MODES:
-        raise ValueError(f"VPA_MODE must be one of {MODES} (or bf16/fp16), got {raw!r}")
-    return mode
+    if mode in MODES:
+        return mode
+    mode = canonical(mode)
+    if mode in KNOWN:
+        return mode
+    raise ValueError(f"VPA_MODE must be one of {MODES} or a version {sorted(KNOWN)}, got {raw!r}")
 
 
 def _int(env: Mapping[str, str], key: str, default: int) -> int:
@@ -122,6 +128,10 @@ class Settings:
     swap_policy: str = "external"
 
     def __post_init__(self) -> None:
+        if self.mode not in MODES and self.format != "swap":
+            raise ValueError(f"VPA_MODE={self.mode!r} needs VPA_FORMAT=swap")
+        if self.mode not in MODES and self.mode not in self.swap_versions:
+            raise ValueError(f"VPA_MODE={self.mode!r} is not in VPA_VERSIONS={self.swap_versions}")
         if self.swap_policy not in ("external", "hysteresis"):
             raise ValueError(f"VPA_SWAP_POLICY must be external or hysteresis, got {self.swap_policy!r}")
         if self.format not in FORMATS:
