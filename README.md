@@ -17,7 +17,7 @@ quiet → busy (96 users) → quiet test:
 | Largest gap between two streamed tokens | 140 ms | **120 ms** (no pause from switching) |
 | Quiet-phase output | BF16 | bit-identical to BF16 |
 
-Full measurements, methods, costs and caveats: [`docs/FINDINGS.md`](docs/FINDINGS.md).
+Full measurements, methods, costs and caveats: [`docs/FINDINGS.md`](docs/FINDINGS.md). Next design (multiple precision versions on VRAM / RAM / disk tiers): [`docs/DESIGN-multi-precision.md`](docs/DESIGN-multi-precision.md).
 
 ## How it works
 
