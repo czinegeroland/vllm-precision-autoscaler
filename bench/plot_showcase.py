@@ -157,7 +157,7 @@ def shade(ax, spans):
 def label_bands(ax, spans):
     y = 1.02
     for a, b, v in spans:
-        if b - a < 8:
+        if b - a < 30:  # too narrow for a label; the color still shows it
             continue
         ax.text((a + b) / 2, y, VERSION_LABEL[v], transform=ax.get_xaxis_transform(),
                 ha="center", va="bottom", fontsize=10.5, fontweight="bold", color=INK)

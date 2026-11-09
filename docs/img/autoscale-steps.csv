@@ -14,6 +14,6 @@ autoscaled,80.0,16,16-bit,81.7,True
 autoscaled,120.0,32,FP8,79.4,True
 autoscaled,180.0,48,INT4,74.8,True
 autoscaled,240.0,64,INT4,55.9,False
-autoscaled,300.0,32,FP8,88.3,True
-autoscaled,340.0,16,16-bit,100.8,True
+autoscaled,300.0,32,FP8/INT4,88.3,True
+autoscaled,340.0,16,16-bit/FP8,100.8,True
 autoscaled,380.0,4,16-bit,98.3,True

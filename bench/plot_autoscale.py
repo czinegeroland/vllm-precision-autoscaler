@@ -56,9 +56,11 @@ def steps(data, target):
         vals = [v for x, v in speeds if lo <= x < b]
         ss = [s for s in data["samples"] if lo <= s["t"] < b]
         vers = [active_version(s) for s in ss if active_version(s)]
-        main = max(set(vers), key=vers.count) if vers else None
+        order = ["high", "fp8", "int4"]
+        used = [v for v in order if vers and vers.count(v) / len(vers) >= 0.25]
         tok = statistics.median(vals) if vals else None
-        rows.append({"start_s": a, "users": users, "version": VERSION_LABEL.get(main, "-"),
+        rows.append({"start_s": a, "users": users,
+                     "version": "/".join(VERSION_LABEL[v] for v in used) or "-",
                      "per_user_tok_s": round(tok, 1) if tok else None,
                      "meets_target": bool(tok and tok >= target)})
     return rows
@@ -110,13 +112,15 @@ def main():
     auto = json.loads((run / "autoscaled.json").read_text())
     end = min(max(s["t"] for s in base["samples"]), max(s["t"] for s in auto["samples"]))
     spans = version_spans(auto["samples"], end)
+    vram = next((x.get("vram_total_gib") for x in auto["samples"] if x.get("vram_total_gib")), None)
+    gpu_note = f" ({vram:.0f} GB)" if vram else ""
 
     fig, axes = plt.subplots(3, 1, figsize=(10, 9), sharex=True, gridspec_kw={"hspace": 0.45,
                                                                                "height_ratios": [1, 1.6, 1.1]})
     fig.subplots_adjust(top=0.87)
     fig.suptitle("More users, (almost) the same per-user speed",
                  x=0.06, ha="left", fontsize=15, fontweight="bold", color=INK, y=0.985)
-    fig.text(0.06, 0.935, f"{auto['model'].split('/')[-1]} on one RTX 4090. Background = precision "
+    fig.text(0.06, 0.935, f"{auto['model'].split('/')[-1]} on one RTX 4090{gpu_note}. Background = precision "
              "chosen by the controller; dashed lines = switches", fontsize=10, color=INK2)
 
     ax = axes[0]

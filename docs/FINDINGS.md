@@ -1254,3 +1254,41 @@ request's own decode speed ((tokens − 1) / streaming time), which is what a us
 
 Note on the hardware: this 4090 had 48 GB. Decode speed matches the 24 GB card (same chip),
 but the KV cache is 2.7× larger, so there was no queueing at 64 users.
+
+
+## 19. Same test on a standard 24 GB RTX 4090 (run 13, 2026-11-09)
+
+Pod `legrfvu08xk9qc`, RunPod Secure RTX 4090 **24 GB** (verified with nvidia-smi before use;
+48 GB variants would have been terminated), $0.89/h, 32 min ≈ **$0.48**; total ≈ **$9.45**.
+Same server/controller/config as §18; the ramp adds a 96-user step:
+4 → 8 → 16 → 32 → 48 → 64 → **96** → 32 → 16 → 4 users. KV cache 87,488 tokens (vs 243,824
+on the 48 GB card). Charts: `docs/img/24gb/autoscale-users.png`, `docs/img/24gb/autoscale-hero.png`;
+data: `results/autoscale_24g/` (incl. `prometheus-snapshot/`).
+
+**Per-user speed** (median decode speed per request, tokens/s; "vs 4 users" = drop from quiet):
+
+| Users | 16-bit only (without autoscaling) | vs 4 users | Autoscaled | vs 4 users | Version |
+|---|---|---|---|---|---|
+| 4 | 96.5 | — | 96.5 | — | 16-bit |
+| 8 | 90.0 | −7% | 90.1 | −7% | 16-bit |
+| 16 | 79.6 | −18% | 97.9* | — | 16-bit/FP8* |
+| 32 | 65.1 | −33% | **77.0** | −20% | FP8 |
+| 48 | 53.3 ✗ | −45% | **73.4** | −24% | INT4 |
+| 64 | 44.8 ✗ | −54% | 55.8 ✗ | −42% | INT4 |
+| 96 | 32.5 ✗ | **−66%** | 33.3 ✗ | −65% | INT4 |
+
+\* the controller briefly went to FP8 during this step (see below), so this point is not pure 16-bit.
+
+- **Without autoscaling, per-user speed falls by a third at 32 users and by two thirds at 96.**
+- **Target 60 tok/s per user: 16-bit only holds it up to 32 users, autoscaled up to 48 (+50%)**,
+  same result as the 48 GB card (the two cards decode at the same speed below 64 users).
+- Requests completed during the ramp: **3884 vs 3315 (+17%)**.
+- **At 96 users INT4 does not help (33.3 vs 32.5).** The GPU is compute-bound there, and
+  W4A16 still computes in 16-bit, so it loses its advantage (as in the §15 sweep, where FP8
+  overtook INT4 between 64 and 128 users). Policy fix for the next run: above ~80 users,
+  step back from INT4 to FP8 instead of staying on INT4.
+- **False step-down at the 8 → 16 step:** the 8 old clients finish their last request while
+  16 new ones start, so the controller saw 24 requests for ~3 s (≥ hold_down_s = 2 s) and
+  switched to FP8, then back to 16-bit after 20 s. Harmless (two sub-second migrations), but
+  a 2 s hold reacts to short bursts; a longer hold or an averaged user count filters them.
+- Migrations under load: 0.25–0.75 s, one 1.2 s (INT4 → FP8 while 32 new users sent prompts).
