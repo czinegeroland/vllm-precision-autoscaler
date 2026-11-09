@@ -34,8 +34,8 @@
   {
    "id": 1,
    "type": "timeseries",
-   "title": "Per-user speed (tokens/s per user, median) vs target",
-   "description": "1 / inter-token latency: how fast each user sees the answer stream.",
+   "title": "Per-user speed (tokens/s each user receives) vs target",
+   "description": "Generated tokens/s divided by running requests. (vLLM's inter-token latency histogram is too coarse for this: its buckets jump from 10 ms to 25 ms.)",
    "datasource": {
     "type": "prometheus",
     "uid": "prometheus"
@@ -52,8 +52,8 @@
       "type": "prometheus",
       "uid": "prometheus"
      },
-     "expr": "1 / histogram_quantile(0.5, sum by (le) (rate(vllm:inter_token_latency_seconds_bucket[15s])))",
-     "legendFormat": "per-user tok/s (median)",
+     "expr": "sum(rate(vllm:generation_tokens_total[15s])) / avg_over_time(sum(vllm:num_requests_running)[15s:2s])",
+     "legendFormat": "per-user tok/s",
      "refId": "A",
      "range": true
     },
@@ -62,8 +62,8 @@
       "type": "prometheus",
       "uid": "prometheus"
      },
-     "expr": "1 / histogram_quantile(0.9, sum by (le) (rate(vllm:inter_token_latency_seconds_bucket[15s])))",
-     "legendFormat": "slowest 10% of tokens",
+     "expr": "vpa_ctl_per_user_tok_s",
+     "legendFormat": "as measured by the controller",
      "refId": "B",
      "range": true
     },
@@ -92,7 +92,7 @@
      {
       "matcher": {
        "id": "byName",
-       "options": "per-user tok/s (median)"
+       "options": "per-user tok/s"
       },
       "properties": [
        {
@@ -107,7 +107,7 @@
      {
       "matcher": {
        "id": "byName",
-       "options": "slowest 10% of tokens"
+       "options": "as measured by the controller"
       },
       "properties": [
        {
@@ -115,6 +115,16 @@
         "value": {
          "mode": "fixed",
          "fixedColor": "#8a8984"
+        }
+       },
+       {
+        "id": "custom.lineStyle",
+        "value": {
+         "fill": "dash",
+         "dash": [
+          8,
+          6
+         ]
         }
        }
       ]

@@ -51,13 +51,16 @@ ITL = "sum by (le) (rate(vllm:inter_token_latency_seconds_bucket[15s]))"
 panels = []
 
 # --- row 1: the question ---------------------------------------------------
-p = panel("Per-user speed (tokens/s per user, median) vs target", 0, 0, 14, 10,
-          [(f"1 / histogram_quantile(0.5, {ITL})", "per-user tok/s (median)"),
-           (f"1 / histogram_quantile(0.9, {ITL})", "slowest 10% of tokens"),
+PER_USER = ("sum(rate(vllm:generation_tokens_total[15s])) / "
+            "avg_over_time(sum(vllm:num_requests_running)[15s:2s])")
+p = panel("Per-user speed (tokens/s each user receives) vs target", 0, 0, 14, 10,
+          [(PER_USER, "per-user tok/s"),
+           ("vpa_ctl_per_user_tok_s", "as measured by the controller"),
            (f"vector({SLO})", f"target ({SLO} tok/s)")],
-          desc="1 / inter-token latency: how fast each user sees the answer stream.")
-color(p, "per-user tok/s (median)", INK)
-color(p, "slowest 10% of tokens", "#8a8984")
+          desc="Generated tokens/s divided by running requests. (vLLM's inter-token latency "
+          "histogram is too coarse for this: its buckets jump from 10 ms to 25 ms.)")
+color(p, "per-user tok/s", INK)
+color(p, "as measured by the controller", "#8a8984", dashed=True)
 color(p, f"target ({SLO} tok/s)", RED, dashed=True)
 p["fieldConfig"]["defaults"]["min"] = 0
 panels.append(p)

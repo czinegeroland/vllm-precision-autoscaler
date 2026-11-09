@@ -7,8 +7,13 @@ grows, by stepping down a precision ladder (e.g. 16-bit -> FP8 -> INT4), and
 step back up when load falls so quiet periods get full quality.
 
 Signals (from vLLM's own Prometheus endpoint, GET /metrics):
-    users        = vllm:num_requests_running + vllm:num_requests_waiting
-    per-user tok/s = 1 / median(vllm:inter_token_latency_seconds) over `window_s`
+    users          = vllm:num_requests_running + vllm:num_requests_waiting
+    per-user tok/s = rate(vllm:generation_tokens_total) / mean(num_requests_running)
+                     over `window_s`
+    (Not 1 / median(vllm:inter_token_latency_seconds): that histogram's buckets jump
+    from 10 ms to 25 ms, so anything between 40 and 100 tok/s per user falls into
+    one bucket and a 60 tok/s target can't be resolved. Measured on a 4090: a real
+    10 ms gap read as "58 tok/s" and triggered a false step down.)
 
 Policy (config file, see controller/config.example.yaml):
     ladder: [high, fp8, int4]               index = level (0 = best quality)
@@ -39,6 +44,18 @@ from dataclasses import dataclass, field
 GAUGE_RE = re.compile(r"^(vllm:num_requests_(?:running|waiting))(?:\{[^}]*\})? ([0-9.eE+-]+)$", re.M)
 BUCKET_RE = re.compile(r'^vllm:inter_token_latency_seconds_bucket\{([^}]*)\} ([0-9.eE+-]+)$', re.M)
 LE_RE = re.compile(r'le="([^"]+)"')
+GEN_RE = re.compile(r"^vllm:generation_tokens_total(?:\{[^}]*\})? ([0-9.eE+-]+)$", re.M)
+
+
+def per_user_tok_s(history: list) -> float | None:
+    """history: [(t, generation_tokens_total, running)] oldest first."""
+    if len(history) < 2:
+        return None
+    (t0, g0, _), (t1, g1, _) = history[0], history[-1]
+    running = sum(r for _, _, r in history) / len(history)
+    if t1 <= t0 or running < 0.5:
+        return None
+    return (g1 - g0) / (t1 - t0) / running
 
 
 @dataclass
@@ -218,13 +235,11 @@ def main() -> int:
         for name, value in GAUGE_RE.findall(text):
             vals[name] += float(value)
         users = vals["vllm:num_requests_running"] + vals["vllm:num_requests_waiting"]
-        history.append((now, itl_buckets(text)))
+        gen = sum(float(v) for v in GEN_RE.findall(text))
+        history.append((now, gen, vals["vllm:num_requests_running"]))
         while len(history) > 1 and history[0][0] < now - cfg.window_s:
             history.pop(0)
-        p50 = quantile(history[0][1], history[-1][1], 0.5) if len(history) > 1 else None
-        tok = (1.0 / p50) if p50 else None
-        if users == 0:
-            tok = None  # idle: no tokens, nothing to judge
+        tok = per_user_tok_s(history)  # None when idle
         decision = policy.decide(now, users, tok)
         if decision:
             level, reason = decision
@@ -237,6 +252,7 @@ def main() -> int:
             if exp.ok:
                 exp.switches.labels(version, reason.split()[0]).inc()
             policy.switched(now, level)
+            history.clear()  # judge the new precision on its own tokens only
         migs = state.get("migrations") or []
         if migs and not state.get("migrating") and migs[-1] != last_mig:
             last_mig = migs[-1]

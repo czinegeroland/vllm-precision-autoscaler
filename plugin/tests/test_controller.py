@@ -97,3 +97,10 @@ def test_example_config_loads():
     pytest.importorskip("yaml")
     c = pc.load_config(str(ROOT / "controller" / "config.example.yaml"), {})
     assert c.ladder == ["high", "fp8", "int4"]
+
+
+def test_per_user_tok_s_from_counter_and_running():
+    hist = [(0.0, 1000.0, 4), (5.0, 3000.0, 4), (10.0, 5000.0, 4)]
+    assert pc.per_user_tok_s(hist) == pytest.approx(100.0)       # 400 tok/s / 4 users
+    assert pc.per_user_tok_s([(0.0, 0.0, 0), (10.0, 0.0, 0)]) is None   # idle
+    assert pc.per_user_tok_s(hist[:1]) is None
