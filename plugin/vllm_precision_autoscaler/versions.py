@@ -126,6 +126,26 @@ class Int4Kind:
         marlin_s = marlin_permute_scales(scales, k, n, g)
         return marlin_w, marlin_s
 
+    _workspaces: dict = {}
+
+    def workspace(self, device: torch.device) -> torch.Tensor:
+        """Marlin's lock buffer, owned by the plugin and allocated at model
+        load. (vLLM's get_marlin_workspace() comes from its workspace manager,
+        which is locked after warmup and keyed per CUDA stream; INT4 may first
+        run on the main stream only after a later switch, which then fails.)
+        Marlin resets the locks after every call, so ordered calls share it."""
+        key = str(device)
+        ws = self._workspaces.get(key)
+        if ws is None:
+            from vllm.model_executor.layers.quantization.utils.marlin_utils import (
+                MARLIN_MAX_BLOCKS_PER_SM,
+                marlin_make_workspace_new,
+            )
+
+            ws = marlin_make_workspace_new(device, MARLIN_MAX_BLOCKS_PER_SM)
+            self._workspaces[key] = ws
+        return ws
+
     def build(self, weight: torch.Tensor) -> LayerVersion:
         from vllm.model_executor.layers.quantization.utils.marlin_utils import marlin_make_empty
 
@@ -133,13 +153,13 @@ class Int4Kind:
         cpu = torch.empty(marlin_w.numel() * 4, dtype=torch.uint8, pin_memory=True)
         cpu.copy_(marlin_w.view(torch.uint8).reshape(-1))
         return LayerVersion(cpu=cpu, nbytes=cpu.numel(),
-                            aux={"scale": marlin_s, "zp": marlin_make_empty(weight.device).data})
+                            aux={"scale": marlin_s, "zp": marlin_make_empty(weight.device).data,
+                                 "workspace": self.workspace(weight.device)})
 
     def apply(self, x: torch.Tensor, region: torch.Tensor, aux: dict, bias: Optional[torch.Tensor],
               n: int, k: int) -> torch.Tensor:
         from vllm.model_executor.layers.quantization.utils.marlin_utils import (
             apply_gptq_marlin_linear,
-            get_marlin_workspace,
         )
         from vllm.scalar_type import scalar_types
 
@@ -158,7 +178,7 @@ class Int4Kind:
             bias = cached[1]
         return apply_gptq_marlin_linear(
             input=x, weight=w, weight_scale=aux["scale"], weight_zp=aux["zp"],
-            workspace=get_marlin_workspace(x.device), wtype=scalar_types.uint4b8,
+            workspace=aux["workspace"], wtype=scalar_types.uint4b8,
             output_size_per_partition=n, input_size_per_partition=k, bias=bias,
         )
 
