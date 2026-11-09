@@ -223,7 +223,7 @@ the API to help the controller.
 | Phase | Work | Done when | GPU |
 |---|---|---|---|
 | 0 | ~~Profile swap prefill~~ **done** (FINDINGS §12): no prefill cost, nothing to fix | — | 4090, $0.23 |
-| 1 | Chunked staging + background copy thread | 32B FP8 migration ≤ ~2 s with traffic and while idle | 4090 + short H100 check |
+| 1 | ~~Faster migrations~~ **done** (FINDINGS §13): packed staging + idle drain; 4B: 0.31 s / 0.77 s loaded, 0.28 s / 0.55 s idle | H100 confirmation pending | 4090, $0.32 |
 | 2 | Generalize "precision" into versions using vLLM quantization methods (BF16 + FP8 first, behaviour identical to v0.3.0) | existing tests pass; API lists versions | 4090 |
 | 3 | Config file + RAM budget + `prepare`/`evict` | BF16 + FP8 + INT8 (online) from config | 4090 |
 | 4 | INT4 from an AWQ checkpoint (Marlin) | INT4 activates while serving; batch-size sweep BF16/FP8/INT4 | 4090 (Qwen3-4B-AWQ) |

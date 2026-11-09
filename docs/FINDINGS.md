@@ -959,3 +959,50 @@ item 1 are withdrawn. The busy-phase difference to stock FP8 on the H100 (937 vs
 smaller KV-cache-independent costs measured there (e.g. the 1.6 s stall at the burst
 start) and the absence of a same-host stock phase baseline. Lesson for the article:
 **compare like with like** (same load shape, same concurrency, same host).
+
+## 13. Faster migrations (run 7, 2026-11-09): packing + idle drain
+
+Pod `tfgxfgwmhsqequ`, RunPod Secure RTX 4090, $0.89/h, 21 min ≈ **$0.32**; total
+spend ≈ **$6.15**. Qwen3-4B, swap format with the HTTP API, `FULL_DECODE_ONLY`.
+`bench/migration_bench.sh`: switch via `POST /v1/precision`, client polls
+`GET /v1/precision` every 0.25 s; "loaded" = 8 users generating continuously,
+"idle" = no traffic. Files: `results/migration_v031/`, `results/migration/`.
+
+**Two problems found on the H100 (§11):** (1) each staging buffer carried exactly one
+layer per engine step, although most layers are much smaller than the buffer (sized
+for the largest layer); (2) with no traffic there are no engine steps, so the
+migration only advanced once per API poll.
+
+**Changes:**
+- **v0.3.1, packing** (`VPA_SWAP_PACK=1`, default): fill each staging buffer with as
+  many whole layers as fit; plus `VPA_SWAP_STAGING_MIB`, a staging budget in MiB
+  instead of a buffer count.
+- **v0.3.2, idle drain:** when no engine step ran for 0.2 s, a `GET`/`POST` on
+  `/v1/precision` finishes the whole migration in one call (waiting for each copy).
+  Under load nothing changes: steps keep driving the migration, so serving is never
+  blocked.
+
+**Results** (Qwen3-4B: 144 layers; to FP8 = 3.38 GiB, to 16-bit = 6.77 GiB):
+
+| Variant | Staging | Loaded → FP8 | Loaded → 16-bit | Idle → FP8 | Idle → 16-bit |
+|---|---|---|---|---|---|
+| no packing (v0.3.0 behaviour) | 4 × 95 MiB | 0.88 s · 144 transfers | 0.90 s · 144 | 9.18 s | 9.20 s |
+| packing (v0.3.1) | 4 × 95 MiB | 0.34 s · 40 | 0.63 s · 80 | 2.56 s | 5.11 s |
+| packing, 1 GiB budget (v0.3.1) | 10 × 95 MiB | 0.35 s · 40 | 0.70 s · 80 | 1.03 s | 2.05 s |
+| **packing + idle drain (v0.3.2)** | 4 × 95 MiB | **0.31 s** · 40 | **0.77 s** · 80 | **0.28 s** | **0.55 s** |
+
+- **Packing: 2.6× faster to FP8 under load** (0.88 → 0.34 s), 3.6× fewer transfers,
+  **with no extra memory**.
+- **Under load, more staging memory doesn't help** (1 GiB ≈ same as 380 MiB): copies
+  already run at ~10 GB/s, close to what this host's PCIe path delivers.
+- **Idle drain: 33× / 17× faster idle switches** (9.2 s → 0.28 / 0.55 s, ~12 GB/s),
+  independent of the controller's polling interval.
+- GPU tests on v0.3.2: 4/4 swap tests pass. One test had to change: with packing, all
+  three small test layers fit in the two staging buffers launched in one step, so the
+  "some step must have mixed precisions" check never triggered; the fixture now uses
+  one staging buffer (the per-step consistency check itself passed throughout).
+
+**Expected on Qwen3-32B** (not yet measured): packing turns the ~4 layers per decoder
+block into ~2 transfers, so the H100 switch (7–8 s in §11) should approach the copy
+bandwidth limit (~2–3 s for 29–58 GiB at 13–22 GB/s), and idle switches no longer
+stall (the 43.9 s case in §11.2).
