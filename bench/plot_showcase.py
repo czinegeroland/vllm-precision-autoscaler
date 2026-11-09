@@ -194,11 +194,14 @@ def phase_bounds(data):
     return out
 
 
-def hero(data, base, out):
+def hero(data, base, out, compact=False):
     end = max(s["t"] for s in data["samples"])
     spans, migs = version_spans(data["samples"], end), migrations(data)
-    fig, axes = plt.subplots(4, 1, figsize=(11, 10.5), sharex=True,
+    n = 3 if compact else 4
+    fig, axes = plt.subplots(n, 1, figsize=(10, 8.2) if compact else (11, 10.5), sharex=True,
                              gridspec_kw={"hspace": 0.45})
+    if compact:
+        fig.subplots_adjust(top=0.86)
     fig.suptitle(f"Precision follows load: {data['model'].split('/')[-1]} on one GPU",
                  x=0.06, ha="left", fontsize=15, fontweight="bold", color=INK, y=0.985)
     fig.text(0.06, 0.945, "Background = precision of the weights in VRAM; dashed lines = "
@@ -234,19 +237,26 @@ def hero(data, base, out):
     ax.set_title("Per-user latency: time between tokens (ms, median over 5 s; lower is better)")
     ax.set_ylim(bottom=0)
 
-    ax = axes[3]
-    xs = [s["t"] for s in data["samples"]]
-    ax.plot(xs, [weights_gib(s) for s in data["samples"]], color=INK)
-    ax.set_title("Model weights in VRAM (GiB): the active precision")
-    ax.set_ylim(bottom=0)
-    ax.set_xlabel("time (s)")
-
+    if compact:
+        ax.set_xlabel("time (s)")
+    else:
+        ax = axes[3]
+        weights_panel(ax, data)
     for i, ax in enumerate(axes):
         shade(ax, spans)
-        mark_switches(ax, migs, text=(i == 3))
+        mark_switches(ax, migs, text=(i == n - 1))
         ax.set_xlim(0, end)
     fig.savefig(out, dpi=170, bbox_inches="tight")
     plt.close(fig)
+
+
+def weights_panel(ax, data):
+    if True:
+        xs = [s["t"] for s in data["samples"]]
+        ax.plot(xs, [weights_gib(s) for s in data["samples"]], color=INK)
+        ax.set_title("Model weights in VRAM (GiB): the active precision")
+        ax.set_ylim(bottom=0)
+        ax.set_xlabel("time (s)")
 
 
 def telemetry(data, base, out):
@@ -354,6 +364,7 @@ def main():
     out = pathlib.Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
     hero(data, base, out / "showcase-hero.png")
+    hero(data, base, out / "showcase-compact.png", compact=True)
     telemetry(data, base, out / "showcase-telemetry.png")
     summary(data, base, out / "showcase-summary.csv")
     print("wrote", out)

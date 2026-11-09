@@ -1169,7 +1169,7 @@ INT4 buys the most speed at low and medium load but costs ~4 GSM8K points.
 Pod `baw1jaxzq0ipeg`, RunPod Secure RTX 4090, $0.89/h, 38 min ≈ **$0.56**; total ≈ **$8.53**.
 Qwen3-4B. Scripts: `bench/run_showcase.sh`, `bench/showcase_load.py` (load + scheduled
 switches + NVML/psutil/vLLM/plugin telemetry every 0.5 s), `bench/plot_showcase.py`.
-Charts: `docs/img/showcase-hero.png`, `docs/img/showcase-telemetry.png`; data `results/showcase/`.
+Charts: `docs/img/showcase-hero.png` (4 panels), `docs/img/showcase-compact.png` (3 panels, for Medium), `docs/img/showcase-telemetry.png`; data `results/showcase/`.
 
 Load 4 → 32 (60 s) → 128 (150 s) → 4 users (240 s); switches 16-bit → INT4 (75 s) → FP8
 (165 s) → 16-bit (255 s). Baseline: same load, 16-bit throughout.
