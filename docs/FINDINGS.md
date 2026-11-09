@@ -1163,3 +1163,35 @@ checkpoint `Qwen/Qwen3-4B-AWQ` served by stock vLLM.
 
 So: FP8 is the default "under load" gear (almost no quality cost, best at high load);
 INT4 buys the most speed at low and medium load but costs ~4 GSM8K points.
+
+## 17. Telemetry showcase: all three precisions under changing load (run 11, 2026-11-09)
+
+Pod `baw1jaxzq0ipeg`, RunPod Secure RTX 4090, $0.89/h, 38 min ≈ **$0.56**; total ≈ **$8.53**.
+Qwen3-4B. Scripts: `bench/run_showcase.sh`, `bench/showcase_load.py` (load + scheduled
+switches + NVML/psutil/vLLM/plugin telemetry every 0.5 s), `bench/plot_showcase.py`.
+Charts: `docs/img/showcase-hero.png`, `docs/img/showcase-telemetry.png`; data `results/showcase/`.
+
+Load 4 → 32 (60 s) → 128 (150 s) → 4 users (240 s); switches 16-bit → INT4 (75 s) → FP8
+(165 s) → 16-bit (255 s). Baseline: same load, 16-bit throughout.
+
+| Segment | Users | Version | tok/s (baseline → switching) | TPOT p50 ms | TTFT p95 ms | Power W |
+|---|---|---|---|---|---|---|
+| 0–60 | 4 | 16-bit | 374 → 372 | 10.1 → 10.1 | 158 → 166 | 307 → 308 |
+| 75–150 | 32 | **INT4** | 1944 → **2813 (+45%)** | 13.1 → **7.8** | 504 → 752 | 395 → 394 |
+| 150–165 | 128 (burst) | INT4 | 2849 → 3056 | 26.4 → 25.7 | 4234 → 4105 | 445 → 426 |
+| 165–240 | 128 | **FP8** | 2967 → **3436 (+16%)** | 24.6 → 23.9 | 883 → **453** | 444 → **404** |
+| 255–300 | 4 | 16-bit | 371 → 374 | 10.2 → 10.2 | 107 → 200 | 329 → 320 |
+
+Migrations under load: → INT4 **0.21 s** (1.69 GiB), → FP8 **0.56 s** (3.38 GiB), → 16-bit
+**0.73 s** (6.77 GiB); PCIe host→GPU peaks 14–19 GB/s, only during switches.
+
+- **Requests served in 5 min: 2366 vs 1989 (+19%)** on the same GPU.
+- The 4 s TTFT at the 128-user burst happens in **both** runs (prefill wave of 128 new
+  requests, KV cache 92–94%, ~10–15 queued); it is not caused by INT4.
+- **Constant:** VRAM allocated ~22.3–22.9 GiB (vLLM reserves it up front; freed weight
+  space is not reused yet), vLLM RSS ~20 GiB (includes 11.84 GiB pinned copies of all
+  three versions), CPU ≤ ~1 core of 128. Temperature 33–66 °C, SM clock 2.4–2.7 GHz.
+- NVML "GPU utilization" sits near 100% whenever any kernel runs: not a useful load
+  signal for decode; tokens/s, TPOT and KV usage are.
+- Closed-loop clients synchronize at 128 users (all send 256-token requests), so
+  throughput oscillates with a ~10 s period; charts use a 10 s average.

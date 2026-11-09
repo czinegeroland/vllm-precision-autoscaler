@@ -205,18 +205,22 @@ def hero(data, base, out):
              "switch requests (migration time below)", fontsize=10, color=INK2)
 
     ax = axes[0]
-    xs, ys = users_series(data["samples"])
+    xs, ys = [], []
+    for a, b, c in phase_bounds(data):
+        xs += [a, b]
+        ys += [c, c]
     ax.plot(xs, ys, color=INK)
-    ax.set_title("Concurrent users (requests running)", pad=22)
+    ax.set_title("Load: concurrent users sending requests", pad=22)
+    ax.set_ylim(bottom=0)
     label_bands(ax, spans)
 
     ax = axes[1]
     if base:
-        bx, by = throughput(base["records"], end)
+        bx, by = throughput(base["records"], end, smooth=10)
         ax.plot(bx, by, color=BASE, ls="--", lw=1.6, label="16-bit only (baseline run)")
-    x, y = throughput(data["records"], end)
+    x, y = throughput(data["records"], end, smooth=10)
     ax.plot(x, y, color=INK, label="with precision switching")
-    ax.set_title("Output throughput (tokens/s, 5 s average)")
+    ax.set_title("Output throughput (tokens/s, 10 s average)")
     ax.set_ylim(bottom=0)
     legend(ax)
 
@@ -260,7 +264,7 @@ def telemetry(data, base, out):
     panels = [
         ("Users running", [(t, col("num_requests_running"), "running", INK),
                            (t, col("num_requests_waiting"), "waiting (queued)", BASE)], None),
-        ("Output throughput (tokens/s)", [(*throughput(data["records"], end), "", INK)], 0),
+        ("Output throughput (tokens/s, 10 s average)", [(*throughput(data["records"], end, smooth=10), "", INK)], 0),
         ("Time between tokens, median (ms)", [(*tpot_series(data["records"], end), "", INK)], 0),
         ("Time to first token, p95 over 10 s (ms)", [(*ttft_series(data["records"], end), "", INK)], 0),
         ("KV cache in use (%)", [(t, col("kv_cache_usage_perc", 100), "", INK)], (0, 100)),
