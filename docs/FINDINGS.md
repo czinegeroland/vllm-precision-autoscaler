@@ -899,3 +899,63 @@ the phase boundaries (`results/manual/switches.log`):
    steps; 256 layers at 2 per step is the bottleneck on 32B.
 3. Stock-BF16 phased baseline on the H100 (to attribute the 1.6 s stall).
 4. External controller in C#/.NET using `GET /metrics` + `/v1/precision`.
+
+## 12. Prefill investigation (run 6, 2026-11-09): the swap format is *not* slower
+
+Pod `m8o4ds114pak1k`, RunPod Secure RTX 4090 (got one after ~1 min of retrying every
+30 s; 4090/L40S/6000 Ada/5090 were all out of stock earlier), 16 min ≈ **$0.23**;
+total spend ≈ **$5.85**. Qwen3-4B, vLLM v0.32.0, all configs with `cudagraph_mode`
+`FULL_DECODE_ONLY` (prefill without graphs) unless noted. Files: `results/prefill/`,
+`results/ttft_check/`, scripts `bench/prefill_probe.py`, `bench/analyze_trace.py`,
+`bench/ttft_server_check.sh`.
+
+**Question:** §11.3 reported TTFT 438 ms (swap) vs ~122 ms (stock) on Qwen3-32B, and
+63 vs 40 ms p95 on Qwen3-4B, suggesting the plugin slows prefill.
+
+**1. Prefill time in isolation** (offline engine, one request at a time,
+`max_tokens=1`, distinct prompts, median of 10):
+
+| Config | 128 tokens | 512 tokens | 2,048 tokens |
+|---|---|---|---|
+| stock | 14.0 ms | 30.7 ms | 114.6 ms |
+| dual, 16-bit | 14.2 ms | 30.9 ms | 114.8 ms |
+| swap, 16-bit (two graph sets) | 14.0 ms | 30.8 ms | 114.5 ms |
+| swap, 16-bit, no graphs at all | 14.2 ms | 30.4 ms | 114.8 ms |
+
+**2. torch profiler, one 512-token prefill ×3** (`results/prefill/trace_summary.txt`):
+
+| | stock | swap 16-bit |
+|---|---|---|
+| GPU kernels | 1,365 | 1,365 |
+| kernel launches | 678 | 678 |
+| GPU kernel time | 83.3 ms | 83.6 ms |
+| GPU busy | 85.4% | 86.5% |
+| memcpys / syncs | 21 / 25 | 21 / 25 |
+
+**3. Server mode** (`vllm serve`, 512 in / 64 out, `vllm bench serve`):
+
+| | 1 user: TTFT p50 / p95 | 4 users: TTFT p50 / p95 | TPOT p50 |
+|---|---|---|---|
+| stock | 34.8 / 35.5 ms | 113.1 / 120.5 ms | 9.71 ms |
+| swap 16-bit (API plugin on) | 35.7 / 36.8 ms | 113.5 / 120.3 ms | 9.71 ms |
+| swap + `GET /v1/precision` every 0.5 s | 17.7 / 19.6 ms* | 26.2 / 33.4 ms* | 9.70 ms |
+
+\*Not comparable: this run reused the previous run's random seed, so vLLM's prefix
+cache already held the prompts. TPOT is what shows the polling cost: none.
+
+**Conclusion.** The swap format adds **no prefill cost**: same kernels, same GPU
+time, same TTFT (within ~1 ms) as stock at 1 and 4 users. The earlier "gap" was a
+**measurement mistake (mine)**:
+- the H100 swap TTFT (438 ms) came from a phase test with **4 concurrent users** and
+  telemetry polling, the stock number (122 ms) from a **1-user** benchmark; the
+  matching stock phase run had been cancelled. Here, 4 users alone raise stock TTFT
+  from 35 to 113 ms (3.2×);
+- the 4B p95 difference (63 vs 40 ms) in run 4 was a single-run tail (p50: 41.6 vs
+  33.5 ms) and does not reproduce.
+
+**Corrections to §11:** §11.3's "prefill performance of the swap format" and §11.4
+item 1 are withdrawn. The busy-phase difference to stock FP8 on the H100 (937 vs
+1,181 tok/s) remains unexplained by prefill; the remaining candidates are the
+smaller KV-cache-independent costs measured there (e.g. the 1.6 s stall at the burst
+start) and the absence of a same-host stock phase baseline. Lesson for the article:
+**compare like with like** (same load shape, same concurrency, same host).

@@ -210,9 +210,9 @@ the API to help the controller.
    memory limits; the RAM budget must be explicit.
 5. **Disk speed** varies by host (RunPod container disk vs network volume); report the
    measured value instead of assuming.
-6. **Prefill performance** of the swap format is still an open problem (FINDINGS
-   §11.3: TTFT 438 ms vs ~122 ms stock on 32B). Must be understood first, because every
-   added version would inherit it.
+6. ~~Prefill performance of the swap format~~: investigated in FINDINGS §12, the
+   swap format adds no prefill cost (same kernels and TTFT as stock); the earlier gap
+   was a like-for-unlike comparison.
 7. **vLLM version coupling**: the plugin patches vLLM's graph manager (graphs.py) and
    relies on quantization method internals; pinned to v0.32.0.
 8. **Tensor parallelism**: every rank must migrate the same layers in lockstep; not yet
@@ -222,7 +222,7 @@ the API to help the controller.
 
 | Phase | Work | Done when | GPU |
 |---|---|---|---|
-| 0 | **Profile swap prefill** (vLLM torch profiler, stock vs swap) and fix the cause | swap TTFT within ~10% of stock in the same graph mode | 4090, ~$0.5 |
+| 0 | ~~Profile swap prefill~~ **done** (FINDINGS §12): no prefill cost, nothing to fix | — | 4090, $0.23 |
 | 1 | Chunked staging + background copy thread | 32B FP8 migration ≤ ~2 s with traffic and while idle | 4090 + short H100 check |
 | 2 | Generalize "precision" into versions using vLLM quantization methods (BF16 + FP8 first, behaviour identical to v0.3.0) | existing tests pass; API lists versions | 4090 |
 | 3 | Config file + RAM budget + `prepare`/`evict` | BF16 + FP8 + INT8 (online) from config | 4090 |
