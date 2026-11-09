@@ -25,7 +25,8 @@ SHAPES = [(6144, 2560), (19456, 2560), (2560, 9728)]
 @pytest.fixture()
 def setup():
     torch.manual_seed(0)
-    mgr = SwapManager(Settings(mode="high", format="swap", swap_slots=2), _Log())
+    # One staging buffer: transfers serialize, so multi-step (mixed) migrations happen.
+    mgr = SwapManager(Settings(mode="high", format="swap", swap_slots=1), _Log())
     weights, layers = [], []
     for n, k in SHAPES:
         w = (torch.randn(n, k, device="cuda") * 0.02).to(torch.bfloat16)
