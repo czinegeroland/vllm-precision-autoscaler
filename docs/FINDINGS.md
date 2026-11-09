@@ -1104,3 +1104,62 @@ to one version, CUDA graphs FULL_DECODE_ONLY):
 
 **Next:** quality per version (GSM8K incl. INT4), config file (`VPA_CONFIG`),
 H100 + Qwen3-32B confirmation, C# controller + Prometheus telemetry.
+
+## 16. Quality per version: GSM8K (run 10, 2026-11-09)
+
+Pod `tdn6z0x80e15bo`, RunPod Secure **H100 80GB HBM3 (SXM)**, $3.99/h, 16 min ≈ **$1.07**
+(no 4090 / 5090 / Ada GPU was available for ~25 min; H100 SXM was the only free GPU);
+total spend ≈ **$7.97**. Qwen3-4B. Script: `bench/run_quality_versions.sh`
+(`bench/quality_gsm8k.py --format swap --versions high,fp8,int4 --mode <version>`);
+files: `results/quality_versions/`.
+
+Full GSM8K test set (1319 questions), greedy, Qwen3 thinking off, answer after `####`.
+The swap runs start in the given version and wait until every layer holds it
+("all 144 layers in int4") before measuring. Reference INT4: the official calibrated
+checkpoint `Qwen/Qwen3-4B-AWQ` served by stock vLLM.
+
+| Run | What | Correct | Accuracy | 95% CI | vs 16-bit |
+|---|---|---|---|---|---|
+| stock-bf16 | vLLM, no plugin | 1227 | **93.03%** | 91.5–94.3 | — |
+| swap-high | plugin, 16-bit version | 1227 | **93.03%** | 91.5–94.3 | 0.00 |
+| swap-fp8 | plugin, FP8 W8A8 per-channel | 1213 | **91.96%** | 90.4–93.3 | −1.07 |
+| swap-int4 | plugin, INT4 W4A16 RTN g128 (built online) | 1177 | **89.23%** | 87.4–90.8 | −3.80 |
+| stock-awq | calibrated AWQ INT4 checkpoint | 1191 | **90.30%** | 88.6–91.8 | −2.73 |
+
+**Paired comparison** (same questions; "A only" = right in A, wrong in B; McNemar test):
+
+| A vs B | A only | B only | Significant? |
+|---|---|---|---|
+| stock-bf16 vs swap-high | 0 | 0 | identical (1303/1319 replies byte-identical; the rest differ in wording only) |
+| swap-high vs swap-fp8 | 34 | 20 | borderline (p ≈ 0.06) |
+| swap-high vs swap-int4 | 78 | 28 | **yes** (p < 0.001) |
+| stock-bf16 vs stock-awq | 59 | 23 | **yes** (p < 0.001) |
+| stock-awq vs swap-int4 | 60 | 46 | no (p ≈ 0.2) |
+
+**Reading it:**
+
+- **The plugin costs no quality.** Its 16-bit version gets exactly the same questions
+  right as stock vLLM.
+- **FP8 is nearly free:** −1.1 points, at the edge of statistical noise (same as the
+  4090 results in §7: 91.7–92.2%).
+- **INT4 costs real quality: −3.8 points**, clearly significant. It is the
+  emergency gear, not a default.
+- **Our online INT4 is about as good as a calibrated one.** The AWQ checkpoint also
+  loses 2.7 points; the 1.1-point gap between AWQ and our round-to-nearest INT4 is
+  not statistically significant on GSM8K. So building INT4 from the 16-bit weights
+  at load time (no extra checkpoint, no calibration data) is a reasonable choice
+  for this model. A harder benchmark could separate them; GSM8K at ~90% is near
+  its ceiling for a 4B model.
+- (GPU note: the H100 baseline is 93.03% vs 92.12% on the 4090 in §7. Different
+  kernels change greedy outputs slightly; compare versions only within one run.)
+
+**Combined with §15 (speed), the ladder for Qwen3-4B on one GPU:**
+
+| Version | Quality (GSM8K) | Speed vs 16-bit, 1 user | Speed vs 16-bit, 128 users |
+|---|---|---|---|
+| 16-bit | 93.0% | 1.0× | 1.0× |
+| FP8 | 92.0% (−1.1) | 1.26× | **1.12×** (best) |
+| INT4 | 89.2% (−3.8) | **2.21×** (best) | 1.06× |
+
+So: FP8 is the default "under load" gear (almost no quality cost, best at high load);
+INT4 buys the most speed at low and medium load but costs ~4 GSM8K points.

@@ -1,0 +1,18 @@
+run                  n   acc %          95% CI  fp8 token share   gen s
+stock-awq         1319   90.30   88.6-91.8                  -      15
+stock-bf16        1319   93.03   91.5-94.3                  -      15
+swap-fp8          1319   91.96   90.4-93.3              1.000      16
+swap-high         1319   93.03   91.5-94.3              0.000      16
+swap-int4         1319   89.23   87.4-90.8              1.000      21
+
+paired comparison on shared questions (a_only = right only in A):
+         stock-awq vs stock-bf16       n=1319  a_only=23   b_only=59   identical replies=4/1319
+         stock-awq vs swap-fp8         n=1319  a_only=31   b_only=53   identical replies=2/1319
+         stock-awq vs swap-high        n=1319  a_only=23   b_only=59   identical replies=4/1319
+         stock-awq vs swap-int4        n=1319  a_only=60   b_only=46   identical replies=0/1319
+        stock-bf16 vs swap-fp8         n=1319  a_only=34   b_only=20   identical replies=114/1319
+        stock-bf16 vs swap-high        n=1319  a_only=0    b_only=0    identical replies=1303/1319
+        stock-bf16 vs swap-int4        n=1319  a_only=78   b_only=28   identical replies=0/1319
+          swap-fp8 vs swap-high        n=1319  a_only=20   b_only=34   identical replies=114/1319
+          swap-fp8 vs swap-int4        n=1319  a_only=73   b_only=37   identical replies=0/1319
+         swap-high vs swap-int4        n=1319  a_only=78   b_only=28   identical replies=0/1319

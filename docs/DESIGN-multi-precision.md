@@ -229,7 +229,7 @@ the API to help the controller.
 | 4 | ~~INT4 (Marlin)~~ **done** (v0.5.0, FINDINGS §15): built online with RTN g128 instead of an AWQ checkpoint; INT4 2.2× at 1 user, FP8 overtakes it between 64 and 128 users | quality (GSM8K) pending; AWQ checkpoint optional | 4090, $0.52 |
 | 5 | Disk tier (loading-optimized files, threaded reads) | disk → RAM → VRAM activation measured | 4090 |
 | 6 | Telemetry (Prometheus) + controller update | controller plans with `est_activate_s` | — |
-| 7 | H100 + Qwen3-32B end-to-end, quality per version (GSM8K) | article data | H100, ~$3–5 |
+| 7 | H100 + Qwen3-32B end-to-end; ~~quality per version (GSM8K)~~ **done for 4B** (FINDINGS §16: 16-bit 93.0, FP8 92.0, INT4 89.2, AWQ 90.3) | article data | H100, ~$3–5 |
 
 Each phase is shippable and keeps the current API working.
 
