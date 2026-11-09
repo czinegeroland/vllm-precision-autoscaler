@@ -37,6 +37,10 @@ engine-core and worker processes that vLLM spawns.
     VPA_SWAP_DWELL_S  swap+auto: minimum seconds between target changes (5)
     VPA_SWAP_EMA_S    swap+auto: smoothing time constant in seconds (2)
     VPA_SWAP_SLOTS    swap: staging buffers for background copies (4)
+    VPA_SWAP_PACK     swap: 1 = pack several whole layers per staging buffer
+                      (default); 0 = one layer per buffer (v0.3.0 behaviour)
+    VPA_SWAP_STAGING_MIB swap: staging memory budget in MiB; if set, overrides
+                      VPA_SWAP_SLOTS (buffers = budget // largest layer)
     VPA_SWAP_GRAPHS   swap: 1 = record two CUDA graph sets, one per precision
                       (needs cudagraph_mode FULL_DECODE_ONLY or FULL); 0 = never
                       use graphs (cudagraph_mode NONE required). Default 1.
@@ -102,6 +106,8 @@ class Settings:
     swap_dwell_s: float = 5.0
     swap_ema_s: float = 2.0
     swap_slots: int = 4
+    swap_staging_mib: int = 0
+    swap_pack: bool = True
     swap_graphs: bool = True
     swap_policy: str = "external"
 
@@ -131,6 +137,8 @@ class Settings:
             swap_dwell_s=_float(env, "VPA_SWAP_DWELL_S", 5.0),
             swap_ema_s=_float(env, "VPA_SWAP_EMA_S", 2.0),
             swap_slots=max(1, _int(env, "VPA_SWAP_SLOTS", 4)),
+            swap_staging_mib=_int(env, "VPA_SWAP_STAGING_MIB", 0),
+            swap_pack=env.get("VPA_SWAP_PACK", "1").strip().lower() not in ("0", "false", "no", "off"),
             swap_graphs=env.get("VPA_SWAP_GRAPHS", "1").strip().lower() not in ("0", "false", "no", "off"),
             swap_policy=env.get("VPA_SWAP_POLICY", "external").strip().lower(),
         )

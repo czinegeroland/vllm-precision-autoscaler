@@ -98,10 +98,14 @@ def test_roundtrip_bf16_fp8_bf16(setup):
 
 
 def test_every_step_is_consistent_during_migration(setup):
-    """While migrating, each layer's output is exactly BF16 or exactly FP8."""
+    """While migrating, each layer's output is exactly BF16 or exactly FP8.
+    (The BF16 direction is used: those layers don't all fit in one staging
+    buffer, so there are steps with mixed precisions.)"""
     mgr, weights, layers = setup
     xs = [torch.randn(4, k, device="cuda", dtype=torch.bfloat16) for _, k in SHAPES]
     mgr.set_target("fp8")
+    run_until_settled(mgr, layers, xs)
+    mgr.set_target("high")
     seen_mixed = False
     for _ in range(200):
         modes = [mgr.layers[l].mode for l in layers]
@@ -115,8 +119,19 @@ def test_every_step_is_consistent_during_migration(setup):
             seen_mixed = True
         if mgr.current is None and not mgr.inflight:
             break
-    assert all(mgr.layers[l].mode == "fp8" for l in layers)
+    assert all(mgr.layers[l].mode == "high" for l in layers)
     assert seen_mixed, "expected at least one step with mixed precisions"
+
+
+def test_packing_reduces_transfers(setup):
+    """FP8 versions of all three test layers fit one staging buffer together."""
+    mgr, weights, layers = setup
+    xs = [torch.randn(2, k, device="cuda", dtype=torch.bfloat16) for _, k in SHAPES]
+    mgr.set_target("fp8")
+    run_until_settled(mgr, layers, xs)
+    m = mgr.migrations[-1]
+    assert m.layers == len(layers)
+    assert m.transfers < len(layers), m
 
 
 def test_pcie_bandwidth_report(setup):

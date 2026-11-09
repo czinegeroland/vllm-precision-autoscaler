@@ -54,12 +54,15 @@ class Migration:
     layers: int = 0
     bytes: int = 0
     steps: int = 0
+    transfers: int = 0
 
 
 @dataclass
 class _Transfer:
+    """One staging buffer's worth of copies: several whole layers packed
+    back to back (layer_id, offset in the staging buffer, bytes)."""
     slot: int
-    layer_id: int
+    items: list[tuple[int, int, int]]
     mode: str
     done: torch.cuda.Event
 
@@ -100,7 +103,14 @@ class SwapManager:
         if self.staging:
             return
         biggest = max(l.nbytes("high") for l in self.layers.values())
-        for _ in range(self.settings.swap_slots):
+        n_slots = self.settings.swap_slots
+        budget = getattr(self.settings, "swap_staging_mib", 0)
+        if budget:
+            # Memory budget instead of a count: as many largest-layer-sized
+            # buffers as fit (at least one).
+            n_slots = max(1, int(budget * 2**20 // biggest))
+        self.slot_bytes = biggest
+        for _ in range(n_slots):
             self.staging.append(torch.empty(biggest, dtype=torch.uint8, device=device))
             self.slot_free.append(None)
         self.side = torch.cuda.Stream(device=device)
@@ -124,8 +134,20 @@ class SwapManager:
                 self.logger.info("precision_autoscaler swap: migrating to %s", mode)
 
     def _pending(self) -> list[int]:
-        busy = {t.layer_id for t in self.inflight}
+        busy = {lid for t in self.inflight for lid, _, _ in t.items}
         return [i for i in self.order if self.layers[i].mode != self.target and i not in busy]
+
+    def _maybe_finish(self) -> None:
+        if self.current is not None and not self.inflight and not self._pending():
+            m = self.current
+            m.finished = time.monotonic()
+            self.migrations.append(m)
+            self.current = None
+            self.logger.info(
+                "precision_autoscaler swap: now %s; %d layers, %.2f GiB in %.3f s "
+                "over %d steps (%d transfers)",
+                m.target, m.layers, m.bytes / 2**30, m.finished - m.started, m.steps, m.transfers,
+            )
 
     # -- called once per engine step (from the first swap layer's op) ---------
     def on_step(self, num_tokens: int) -> None:
@@ -138,15 +160,7 @@ class SwapManager:
             self.current.steps += 1
         self._complete()
         self._launch()
-        if self.current is not None and not self.inflight and not self._pending():
-            m = self.current
-            m.finished = time.monotonic()
-            self.migrations.append(m)
-            self.current = None
-            self.logger.info(
-                "precision_autoscaler swap: now %s; %d layers, %.2f GiB in %.3f s over %d steps",
-                m.target, m.layers, m.bytes / 2**30, m.finished - m.started, m.steps,
-            )
+        self._maybe_finish()
 
     def pump(self) -> None:
         """Advance a pending migration outside an engine step (from an RPC,
@@ -155,15 +169,7 @@ class SwapManager:
             return
         self._complete()
         self._launch()
-        if self.current is not None and not self.inflight and not self._pending():
-            m = self.current
-            m.finished = time.monotonic()
-            self.migrations.append(m)
-            self.current = None
-            self.logger.info(
-                "precision_autoscaler swap: now %s; %d layers, %.2f GiB in %.3f s over %d steps",
-                m.target, m.layers, m.bytes / 2**30, m.finished - m.started, m.steps,
-            )
+        self._maybe_finish()
 
     def _complete(self) -> None:
         main = torch.cuda.current_stream()
@@ -172,16 +178,16 @@ class SwapManager:
             if not t.done.query():
                 still.append(t)
                 continue
-            layer = self.layers[t.layer_id]
-            nb = layer.nbytes(t.mode)
-            layer.region[:nb].copy_(self.staging[t.slot][:nb], non_blocking=True)
-            layer.mode = t.mode
+            for layer_id, off, nb in t.items:
+                layer = self.layers[layer_id]
+                layer.region[:nb].copy_(self.staging[t.slot][off : off + nb], non_blocking=True)
+                layer.mode = t.mode
+                if self.current is not None and self.current.target == t.mode:
+                    self.current.layers += 1
+                    self.current.bytes += nb
             free = torch.cuda.Event()
             free.record(main)
             self.slot_free[t.slot] = free
-            if self.current is not None and self.current.target == t.mode:
-                self.current.layers += 1
-                self.current.bytes += nb
         self.inflight = still
 
     def _launch(self) -> None:
@@ -192,15 +198,32 @@ class SwapManager:
         for slot in range(len(self.staging)):
             if slot in used or not pending:
                 continue
-            layer = self.layers[pending.pop(0)]
-            src = layer.cpu_high if self.target == "high" else layer.cpu_fp8
+            # Pack as many whole pending layers as fit into this buffer (in
+            # order, skipping ones that don't fit so smaller ones can fill gaps).
+            items, off, rest = [], 0, []
+            for lid in pending:
+                nb = self.layers[lid].nbytes(self.target)
+                pack_ok = getattr(self.settings, "swap_pack", True) or not items
+                if pack_ok and off + nb <= self.slot_bytes:
+                    items.append((lid, off, nb))
+                    off += nb
+                else:
+                    rest.append(lid)
+            pending = rest
+            if not items:
+                continue
             with torch.cuda.stream(self.side):
                 if self.slot_free[slot] is not None:
                     self.side.wait_event(self.slot_free[slot])
-                self.staging[slot][: src.numel()].copy_(src, non_blocking=True)
+                for lid, o, nb in items:
+                    layer = self.layers[lid]
+                    src = layer.cpu_high if self.target == "high" else layer.cpu_fp8
+                    self.staging[slot][o : o + nb].copy_(src, non_blocking=True)
                 done = torch.cuda.Event()
                 done.record(self.side)
-            self.inflight.append(_Transfer(slot, layer.layer_id, self.target, done))
+            self.inflight.append(_Transfer(slot, items, self.target, done))
+            if self.current is not None:
+                self.current.transfers += 1
 
     # -- telemetry -----------------------------------------------------------
     def stats(self) -> dict:
@@ -208,6 +231,7 @@ class SwapManager:
         recent = self.migrations[-10:]
         return {
             "target": self.target,
+            "staging": {"buffers": len(self.staging), "mib_each": round(getattr(self, "slot_bytes", 0) / 2**20)},
             "policy": "hysteresis" if self.policy else "external",
             "layers": len(self.layers),
             "fp8_layers": fp8,
@@ -216,7 +240,7 @@ class SwapManager:
             "steps": self.steps,
             "migrations": [
                 {"target": m.target, "seconds": (m.finished or 0) - m.started, "layers": m.layers,
-                 "gib": m.bytes / 2**30, "steps": m.steps}
+                 "gib": m.bytes / 2**30, "steps": m.steps, "transfers": m.transfers}
                 for m in recent
             ],
         }
