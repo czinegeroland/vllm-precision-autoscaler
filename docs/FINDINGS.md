@@ -1006,3 +1006,39 @@ migration only advanced once per API poll.
 block into ~2 transfers, so the H100 switch (7–8 s in §11) should approach the copy
 bandwidth limit (~2–3 s for 29–58 GiB at 13–22 GB/s), and idle switches no longer
 stall (the 43.9 s case in §11.2).
+
+## 14. N precision versions (v0.4.0, run 8, 2026-11-09)
+
+Pod `y5al866mz6c280`, RunPod Secure RTX 4090, $0.89/h, ~18 min ≈ **$0.27**; total
+spend ≈ **$6.40**. Qwen3-4B. Script: `bench/phase2_check.sh`; files: `results/phase2/`.
+
+**What changed (design phase 2):** "16-bit vs FP8" is no longer hard-coded. A
+*version kind* (`versions.py`) builds a precision's kernel-ready bytes from the 16-bit
+weight, knows its size, and runs its GEMM. Today: `high` (16-bit, PyTorch/cuBLAS) and
+`fp8` (per-channel W8A8, vLLM CUTLASS). The swap manager, the custom op and the CUDA
+graph sets work with version names; `VPA_VERSIONS` (default `high,fp8`) selects
+what is built; the API lists versions and takes `{"version": ...}`.
+
+**Verification (must behave exactly like v0.3.2):**
+
+| Check | Result |
+|---|---|
+| GPU tests (op + swap, incl. "unknown version rejected") | **17 / 17 pass** |
+| Graph sets | recorded per version: `high: 35`, `fp8: 35` |
+| Decode speed, 1 request | 16-bit 100.9 tok/s, FP8 129.4 tok/s (as before) |
+| Round trip 16-bit → FP8 → 16-bit | **16 / 16 outputs identical** |
+| `GET /v1/precision` | lists both versions with bits, method, RAM (6.77 / 3.38 GiB), active layers |
+| `POST {"version":"int3"}` | **HTTP 400** "unknown version 'int3'; available: ['high', 'fp8']" |
+| `POST {"version":"fp8"}` / `{"version":"bf16"}` (alias) | 0.28 s / 0.55 s (idle); completion after round trip: "The capital of France is" → " Paris. The capital of Germany is Berlin" |
+
+**Migration speed vs v0.3.2 (§13)**: loaded → FP8 0.37 s (0.31), → 16-bit 0.76 s
+(0.77); idle → FP8 0.28 s (0.28), → 16-bit 0.55 s (0.55). Same within run-to-run
+noise.
+
+Note: engine startup took 209 s on this host (compile cache disabled for plugin
+runs + host variance); the SSH connection to this host dropped intermittently,
+which interrupted the live log trail but not the run.
+
+**Next (design phase 3–4):** a third version kind, INT4 weight-only (Marlin), and
+the config file. Adding a kind is now one class in `versions.py` plus its name in
+`versions_names.py`.
