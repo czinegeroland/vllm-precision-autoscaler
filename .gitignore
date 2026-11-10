@@ -7,3 +7,6 @@ deploy/runpod/.runpod_api_key
 controller/**/bin/
 controller/**/obj/
 deploy/runpod/ledger.csv
+
+# article drafts and session logs (private, never committed)
+docs/article/
