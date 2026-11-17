@@ -1,0 +1,12 @@
+__pycache__/
+*.egg-info/
+.pytest_cache/
+results/
+deploy/runpod/.keys/
+deploy/runpod/.runpod_api_key
+controller/**/bin/
+controller/**/obj/
+deploy/runpod/ledger.csv
+poc/k8s-keda/.state/
+poc/k8s-keda/.bin/
+

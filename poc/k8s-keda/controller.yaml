@@ -1,0 +1,22 @@
+# Precision controller for one replica in the Kubernetes + KEDA experiment (poc/k8s-keda).
+#
+# KEDA adds a replica for every 32 users (poc/k8s-keda/manifests/vllm.yaml: BF16 holds
+# 60 tok/s per user up to ~32 users on one RTX 4090). The controller therefore lowers the
+# precision only when this replica has clearly more users than KEDA's target, which is
+# exactly the time while new replicas are still starting, and returns to BF16 once the
+# new replicas have taken their share.
+url: http://localhost:8001
+
+ladder: [high, fp8, int4a8]   # INT4 W4A8: fastest version from ~32 users up on a 4090
+
+# users = running + waiting requests on this replica
+step_down_users: [40, 52]     # BF16 -> FP8 at >= 40 users, FP8 -> INT4 W4A8 at >= 52
+step_up_users:   [32, 48]     # INT4 W4A8 -> FP8 at <= 48, FP8 -> BF16 at <= 32
+hold_down_s: 2
+hold_up_s: 15
+dwell_s: 10
+
+slo_tok_s: 0                  # guard off: decisions follow the user count only
+slo_hold_s: 8
+window_s: 10
+interval_s: 0.5

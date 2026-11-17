@@ -1,0 +1,45 @@
+# Local test only: four fake "GPU machines" inside the cluster, each running agent.py --fake
+# (fake_vllm.py with the 4090's measured speeds and a fixed cold start). Backends:
+#   http://agent-N.agent.fake.svc.cluster.local:8000
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: fake
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: agent
+  namespace: fake
+spec:
+  clusterIP: None
+  selector: {app: agent}
+  ports:
+    - port: 8000
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: agent
+  namespace: fake
+spec:
+  serviceName: agent
+  replicas: 4
+  podManagementPolicy: Parallel
+  selector:
+    matchLabels: {app: agent}
+  template:
+    metadata:
+      labels: {app: agent}
+    spec:
+      containers:
+        - name: agent
+          image: vpa-k8s:dev
+          imagePullPolicy: Never
+          command: [python, /app/poc/k8s-keda/agent.py, --fake, --port, "8000",
+                    --cold-start, "COLD_START", --log-dir, /tmp/agent]
+          env:
+            - name: AGENT_TOKEN
+              valueFrom: {secretKeyRef: {name: agent-token, key: token}}
+          ports:
+            - containerPort: 8000

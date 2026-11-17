@@ -1,0 +1,115 @@
+# The vLLM replicas (one per GPU machine) and the KEDA autoscaler.
+# run.sh creates the ConfigMap vllm-config (BACKENDS, MODE) and the Secret agent-token
+# first, and sets maxReplicaCount to the number of GPU machines.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: vpa
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: vllm
+  namespace: vpa
+spec:
+  serviceName: vllm-headless
+  replicas: 1
+  podManagementPolicy: Parallel      # start several replicas at once on a burst
+  selector:
+    matchLabels: {app: vllm}
+  template:
+    metadata:
+      labels: {app: vllm}
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080"
+    spec:
+      terminationGracePeriodSeconds: 70
+      containers:
+        - name: replica
+          image: vpa-k8s:dev
+          imagePullPolicy: Never
+          command: [python, /app/poc/k8s-keda/proxy.py]
+          env:
+            - name: POD_NAME
+              valueFrom: {fieldRef: {fieldPath: metadata.name}}
+            - name: BACKENDS
+              valueFrom: {configMapKeyRef: {name: vllm-config, key: BACKENDS}}
+            - name: MODE
+              valueFrom: {configMapKeyRef: {name: vllm-config, key: MODE}}
+            - name: AGENT_TOKEN
+              valueFrom: {secretKeyRef: {name: agent-token, key: token}}
+          ports:
+            - containerPort: 8080
+          readinessProbe:               # Ready = vLLM on the GPU machine answers
+            httpGet: {path: /ready, port: 8080}
+            periodSeconds: 1
+            failureThreshold: 1
+            successThreshold: 1
+          livenessProbe:
+            httpGet: {path: /healthz, port: 8080}
+            periodSeconds: 10
+          lifecycle:
+            preStop:                    # let the Service drop us before we drain
+              exec: {command: [sleep, "3"]}
+          resources:
+            requests: {cpu: 100m, memory: 128Mi}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vllm-headless
+  namespace: vpa
+spec:
+  clusterIP: None
+  selector: {app: vllm}
+  ports:
+    - port: 8080
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vllm
+  namespace: vpa
+spec:
+  type: NodePort                      # load generator: http://localhost:30080
+  selector: {app: vllm}
+  ports:
+    - port: 8000
+      targetPort: 8080
+      nodePort: 30080
+---
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: vllm
+  namespace: vpa
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: StatefulSet
+    name: vllm
+  pollingInterval: 5
+  minReplicaCount: 1
+  maxReplicaCount: 4                  # = number of GPU machines (run.sh sets it)
+  advanced:
+    horizontalPodAutoscalerConfig:
+      behavior:
+        scaleUp:
+          stabilizationWindowSeconds: 0
+          policies:
+            - {type: Pods, value: 4, periodSeconds: 5}
+        scaleDown:
+          stabilizationWindowSeconds: 90
+          policies:
+            - {type: Pods, value: 1, periodSeconds: 20}
+  triggers:
+    # users = requests running + waiting, over all ready replicas, averaged over 10 s.
+    # (A single sample over-counts: the replicas are scraped at slightly different moments,
+    # so a request that ends on one and a new one that starts on another are both counted.)
+    # One replica per 32 users: BF16 holds 60 tok/s per user up to ~32 users on a 4090.
+    - type: prometheus
+      metadata:
+        serverAddress: http://prometheus.monitoring.svc:9090
+        query: avg_over_time(((sum(vllm:num_requests_running) or vector(0)) + (sum(vllm:num_requests_waiting) or vector(0)))[10s:2s])
+        threshold: "32"
